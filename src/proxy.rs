@@ -165,6 +165,22 @@ impl Proxy {
         }
     }
 
+    /// The proxy `url` goes through according to the system (a [`Resolver::system`](crate::Resolver::system) per call; keep
+    /// a [`Resolver`](crate::Resolver) to reuse one), or `None` when it goes direct.
+    ///
+    /// # Errors
+    ///
+    /// As [`Resolver::lookup`](crate::Resolver::lookup).
+    pub fn for_url(url: &str) -> Result<Option<Self>, Error> {
+        Ok(crate::Resolver::system()
+            .lookup(url)?
+            .into_iter()
+            .find_map(|route| match route {
+                Route::Proxy(proxy) if !proxy.is_gateway() => Some(proxy),
+                _ => None,
+            }))
+    }
+
     /// Whether this is a URL-prefix gateway rather than a proxy.
     #[must_use]
     pub fn is_gateway(&self) -> bool {

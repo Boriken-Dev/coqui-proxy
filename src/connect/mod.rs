@@ -66,7 +66,7 @@ impl Write for Connection {
     }
 }
 
-/// Makes connections, through a proxy where a [`Route`] says so.
+/// Makes connections, through a proxy where a [`Route`](crate::Route) says so.
 #[derive(Debug, Clone)]
 pub struct ProxyConnector {
     settings: ConnectorSettings,

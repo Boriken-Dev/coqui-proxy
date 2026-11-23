@@ -219,6 +219,12 @@ impl BypassRules {
                 None => rules.skipped.push(entry.to_string()),
             }
         }
+        if !rules.skipped.is_empty() {
+            tracing::warn!(
+                skipped = rules.skipped.len(),
+                "ignoring bypass entries that cannot be read"
+            );
+        }
         rules
     }
 

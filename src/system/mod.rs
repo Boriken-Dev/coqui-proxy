@@ -34,7 +34,7 @@ pub(crate) mod process;
     unsafe_code,
     reason = "the WinHTTP calls have no safe binding; each block states its contract"
 )]
-pub mod winhttp;
+pub(crate) mod winhttp;
 #[cfg(target_os = "macos")]
 pub use cfnetwork::CfNetworkSource;
 #[cfg(all(unix, feature = "libproxy"))]
