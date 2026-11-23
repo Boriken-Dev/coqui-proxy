@@ -22,9 +22,23 @@ pub(crate) mod process;
     unsafe_code,
     reason = "the WinHTTP calls have no safe binding; each block states its contract"
 )]
-pub(crate) mod winhttp;
+pub mod winhttp;
+#[cfg(windows)]
+pub use winhttp::WinHttpSource;
 #[cfg(any(windows, test))]
 mod wininet;
+
+/// [`SystemSettings`] as a [`ProxySource`](crate::ProxySource); see [`SystemSettings::to_source`].
+#[derive(Debug, Clone)]
+pub struct SystemSource {
+    resolver: crate::Resolver,
+}
+
+impl crate::ProxySource for SystemSource {
+    fn routes(&self, url: &str) -> Result<Option<Vec<crate::Route>>, crate::Error> {
+        self.resolver.lookup(url).map(Some)
+    }
+}
 
 /// Where a [`SystemSettings`] was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -124,6 +138,31 @@ impl SystemSettings {
 
     /// The manual proxies' answer for `target`: direct for what `bypass` matches and for a
     /// scheme with no proxy.
+    /// These settings as a [`ProxySource`](crate::ProxySource): WinHTTP-less, environment-less, the
+    /// same decision a [`Resolver`](crate::Resolver) takes at its step 4 (auto-detection when
+    /// the settings ask for it or `wpad` is set, the PAC URL, the PAC script, then the manual
+    /// proxies and the bypass list). `timeout` bounds each WPAD probe and PAC download.
+    #[must_use]
+    pub fn to_source(
+        &self,
+        wpad: bool,
+        timeout: core::time::Duration,
+        on_missing_engine: crate::OnMissingEngine,
+    ) -> SystemSource {
+        SystemSource {
+            resolver: crate::Resolver::builder()
+                .environment(crate::Environment::from_pairs(core::iter::empty::<(
+                    String,
+                    String,
+                )>()))
+                .settings(self.clone())
+                .wpad(wpad)
+                .timeout(timeout)
+                .on_missing_engine(on_missing_engine)
+                .build(),
+        }
+    }
+
     pub(crate) fn manual_routes(&self, target: &Target) -> Vec<Route> {
         if self.proxies.is_empty() || self.bypass.matches_target(target) {
             return alloc::vec![Route::Direct];

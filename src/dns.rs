@@ -10,6 +10,7 @@ use std::thread;
 
 /// Resolves `host` to its first address within `timeout`; the lookup itself cannot be
 /// interrupted, so a slow one is left to finish on its own thread.
+#[cfg(feature = "pac")]
 pub(crate) fn resolve(host: &str, timeout: Duration) -> Option<IpAddr> {
     resolve_all(host, timeout).into_iter().next()
 }
@@ -42,8 +43,8 @@ mod tests {
     #[test]
     fn an_address_literal_resolves_without_a_lookup() {
         assert_eq!(
-            resolve("127.0.0.1", Duration::from_millis(1)),
-            Some("127.0.0.1".parse().unwrap())
+            resolve_all("127.0.0.1", Duration::from_millis(1)),
+            ["127.0.0.1".parse::<IpAddr>().unwrap()]
         );
     }
 }

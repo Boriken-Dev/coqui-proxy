@@ -7,8 +7,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::PacScript;
-use super::dns::resolve;
 use super::fetch;
+use crate::dns::resolve;
 
 /// Second-level labels that country-code registries sell names under (`example.co.uk`).
 /// Anyone can register `wpad.<label>.<cc>` there, so devolution stops above them.

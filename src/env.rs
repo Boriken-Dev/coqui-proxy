@@ -6,6 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::bypass::{BypassRules, Dialect};
+use crate::error::Error;
 use crate::proxy::{Proxy, Route, Target};
 
 /// A snapshot of environment variables.
@@ -267,5 +268,112 @@ mod tests {
         let vars = variables(&[("NO_PROXY", "corp.example")]).unwrap();
         assert!(!vars.has_proxies());
         assert!(vars.no_proxy().matches("http://a.corp.example/"));
+    }
+}
+
+/// The proxy variables of an environment as a [`ProxySource`](crate::ProxySource): the proxy for
+/// a URL's scheme (`ws` and `wss` fall back to `http` and `https`, then `all`), after
+/// `NO_PROXY`. A variable that names a PAC location gives no opinion here; a
+/// [`Resolver`](crate::Resolver) runs it.
+#[derive(Debug, Clone, Default)]
+pub struct EnvSource {
+    proxies: BTreeMap<String, crate::ProxySetting>,
+    no_proxy: BypassRules,
+}
+
+/// Builds an [`EnvSource`].
+#[derive(Debug, Clone, Default)]
+#[must_use]
+pub struct EnvSourceBuilder {
+    environment: Option<Environment>,
+    proxies: Option<BTreeMap<String, crate::ProxySetting>>,
+    no_proxy: Option<BypassRules>,
+}
+
+impl EnvSourceBuilder {
+    /// The environment the variables are read from (default: the process's).
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environment = Some(environment);
+        self
+    }
+
+    /// The proxies by scheme (`http`, `https`, `ftp`, `ws`, `wss`, `all`), instead of the
+    /// environment's variables.
+    pub fn proxies(mut self, proxies: BTreeMap<String, crate::ProxySetting>) -> Self {
+        self.proxies = Some(proxies);
+        self
+    }
+
+    /// The hosts that go direct, instead of `NO_PROXY`.
+    pub fn no_proxy(mut self, rules: BypassRules) -> Self {
+        self.no_proxy = Some(rules);
+        self
+    }
+
+    /// The source.
+    pub fn build(self) -> EnvSource {
+        let variables = self
+            .environment
+            .unwrap_or_else(Environment::process)
+            .proxy_variables();
+        let proxies = self.proxies.unwrap_or_else(|| {
+            variables
+                .as_ref()
+                .map(|variables| {
+                    variables
+                        .proxies
+                        .iter()
+                        .filter_map(|(scheme, value)| {
+                            value.parse().ok().map(|setting| (scheme.clone(), setting))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let no_proxy = self.no_proxy.unwrap_or_else(|| {
+            variables
+                .as_ref()
+                .map(ProxyVariables::no_proxy)
+                .unwrap_or_default()
+        });
+        EnvSource { proxies, no_proxy }
+    }
+}
+
+impl EnvSource {
+    /// Starts a source over the process's environment.
+    pub fn builder() -> EnvSourceBuilder {
+        EnvSourceBuilder::default()
+    }
+
+    /// The hosts that go direct.
+    #[must_use]
+    pub fn no_proxy(&self) -> &BypassRules {
+        &self.no_proxy
+    }
+
+    /// The proxy setting of each scheme.
+    #[must_use]
+    pub fn proxies(&self) -> &BTreeMap<String, crate::ProxySetting> {
+        &self.proxies
+    }
+}
+
+impl crate::ProxySource for EnvSource {
+    fn routes(&self, url: &str) -> Result<Option<Vec<Route>>, Error> {
+        let target = Target::parse(url)?;
+        if self.no_proxy.matches_target(&target) {
+            return Ok(Some(alloc::vec![Route::Direct]));
+        }
+        let fallback = match target.scheme.as_str() {
+            "ws" => Some("http"),
+            "wss" => Some("https"),
+            _ => None,
+        };
+        Ok([Some(target.scheme.as_str()), fallback, Some("all")]
+            .into_iter()
+            .flatten()
+            .find_map(|key| self.proxies.get(key))
+            .and_then(crate::ProxySetting::routes))
     }
 }

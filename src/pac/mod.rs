@@ -19,15 +19,14 @@ use std::time::Instant;
 use boa_engine::object::builtins::JsFunction;
 use boa_engine::{Context, JsArgs, JsResult, JsValue, NativeFunction, Source, js_string};
 
+use crate::dns::{resolve, resolve_all};
 use crate::error::{Error, Reason};
 use crate::netutil::wildcard_match;
 use crate::proxy::{Route, Target};
 use crate::settings::PacSettings;
-use dns::{resolve, resolve_all};
 
 mod builtins;
 pub(crate) mod dhcp;
-mod dns;
 pub(crate) mod fetch;
 pub(crate) mod wpad;
 

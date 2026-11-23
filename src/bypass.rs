@@ -1,9 +1,13 @@
 //! Which URLs go direct: bypass lists in each operating system's own syntax.
 
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 use core::str::FromStr;
+use core::time::Duration;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use coqui_net_acl::IpNet;
 
@@ -51,13 +55,13 @@ enum Rule {
 }
 
 impl Rule {
-    fn matches(&self, target: &Target) -> bool {
+    fn matches(&self, target: &Target, lookups: &Lookups) -> bool {
         let port_ok = |wanted: &Option<u16>| wanted.is_none_or(|port| port == target.port);
         let host = target.host.as_str();
         match self {
             Self::Everything => true,
             Self::Local => !host.contains('.') && target.address().is_none(),
-            Self::Subnet => on_local_network(target),
+            Self::Subnet => on_local_network(target, lookups),
             Self::Exact(name, port) => host == name && port_ok(port),
             Self::Suffix(domain, port) => {
                 (host == domain
@@ -100,6 +104,46 @@ pub struct BypassRules {
     skipped: Vec<String>,
     loopback: bool,
     reversed: bool,
+    alternatives: Vec<BypassRules>,
+    lookups: Lookups,
+}
+
+/// When the interface addresses were read, and the addresses with their prefix lengths.
+type Remembered = (Instant, Vec<(IpAddr, u8)>);
+
+/// How `<subnet>` looks hosts and interfaces up: the time limit of a name lookup, how long this
+/// machine's interface addresses are remembered, and the remembered addresses (shared by clones).
+#[derive(Debug, Clone)]
+struct Lookups {
+    dns_timeout: Duration,
+    interface_ttl: Duration,
+    interfaces: Arc<Mutex<Option<Remembered>>>,
+}
+
+impl Default for Lookups {
+    fn default() -> Self {
+        Self {
+            dns_timeout: crate::settings::ResolverSettings::DEFAULT_BYPASS_DNS_TIMEOUT,
+            interface_ttl: crate::settings::ResolverSettings::DEFAULT_INTERFACE_CACHE_TTL,
+            interfaces: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+// The remembered addresses are a cache, not part of what a list says.
+impl PartialEq for Lookups {
+    fn eq(&self, other: &Self) -> bool {
+        self.dns_timeout == other.dns_timeout && self.interface_ttl == other.interface_ttl
+    }
+}
+
+impl Eq for Lookups {}
+
+impl core::hash::Hash for Lookups {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.dns_timeout.hash(state);
+        self.interface_ttl.hash(state);
+    }
 }
 
 impl Default for BypassRules {
@@ -110,7 +154,21 @@ impl Default for BypassRules {
             skipped: Vec::new(),
             loopback: true,
             reversed: false,
+            alternatives: Vec::new(),
+            lookups: Lookups::default(),
         }
+    }
+}
+
+impl core::ops::BitOr for BypassRules {
+    type Output = Self;
+
+    /// A list that bypasses what either bypasses.
+    fn bitor(mut self, other: Self) -> Self {
+        self.entries.extend(other.entries.iter().cloned());
+        self.skipped.extend(other.skipped.iter().cloned());
+        self.alternatives.push(other);
+        self
     }
 }
 
@@ -164,6 +222,21 @@ impl BypassRules {
         rules
     }
 
+    /// The time limit of the name lookup `<subnet>` makes (default 5 seconds).
+    #[must_use]
+    pub fn with_dns_timeout(mut self, timeout: Duration) -> Self {
+        self.lookups.dns_timeout = timeout;
+        self
+    }
+
+    /// How long this machine's interface addresses are remembered for `<subnet>` (default 10
+    /// seconds).
+    #[must_use]
+    pub fn with_interface_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.lookups.interface_ttl = ttl;
+        self
+    }
+
     /// The entries that were read.
     pub fn entries(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(String::as_str)
@@ -183,7 +256,7 @@ impl BypassRules {
 
     /// Whether the list has no entry that can match (loopback still bypasses).
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.alternatives.iter().all(Self::is_empty)
     }
 
     /// Whether `url` goes direct. A URL that cannot be read never matches.
@@ -238,8 +311,15 @@ impl BypassRules {
         if self.loopback && is_loopback(target) {
             return true;
         }
-        let listed = self.rules.iter().any(|rule| rule.matches(target));
-        listed != self.reversed
+        let listed = self
+            .rules
+            .iter()
+            .any(|rule| rule.matches(target, &self.lookups));
+        (listed != self.reversed)
+            || self
+                .alternatives
+                .iter()
+                .any(|other| other.matches_target(target))
     }
 }
 
@@ -258,29 +338,40 @@ fn with_port(host: &str, port: Option<u16>) -> String {
 }
 
 /// Whether the host resolves to a link-local address or to one on a network of a local interface.
-fn on_local_network(target: &Target) -> bool {
-    use std::net::ToSocketAddrs as _;
+fn on_local_network(target: &Target, lookups: &Lookups) -> bool {
     let addresses: Vec<IpAddr> = match target.address() {
         Some(address) => alloc::vec![address],
-        None => (target.host.as_str(), 0)
-            .to_socket_addrs()
-            .map(|found| found.map(|socket| socket.ip()).collect())
-            .unwrap_or_default(),
+        None => crate::dns::resolve_all(&target.host, lookups.dns_timeout),
     };
     if addresses.iter().any(link_local) {
         return true;
     }
-    let Ok(interfaces) = if_addrs::get_if_addrs() else {
-        return false;
-    };
-    interfaces.iter().any(|interface| {
-        let (own, prefix) = match &interface.addr {
-            if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
-            if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+    let mut remembered = lookups
+        .interfaces
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if remembered
+        .as_ref()
+        .is_none_or(|(at, _)| at.elapsed() >= lookups.interface_ttl)
+    {
+        let Ok(interfaces) = if_addrs::get_if_addrs() else {
+            return false;
         };
-        addresses
+        let found = interfaces
             .iter()
-            .any(|address| same_network(*address, own, prefix))
+            .map(|interface| match &interface.addr {
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+            })
+            .collect();
+        *remembered = Some((Instant::now(), found));
+    }
+    remembered.as_ref().is_some_and(|(_, interfaces)| {
+        interfaces.iter().any(|(own, prefix)| {
+            addresses
+                .iter()
+                .any(|address| same_network(*address, *own, *prefix))
+        })
     })
 }
 

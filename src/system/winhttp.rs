@@ -228,3 +228,26 @@ impl Drop for WinHttpResolver {
         unsafe { WinHttpCloseHandle(self.session.0) };
     }
 }
+
+/// WinHTTP as a [`ProxySource`](crate::ProxySource): Internet Options, WPAD and PAC resolved by
+/// the operating system, with the manual proxies when it names neither.
+#[derive(Debug)]
+pub struct WinHttpSource {
+    inner: WinHttpResolver,
+}
+
+impl WinHttpSource {
+    /// Opens a WinHTTP session; `timeout` bounds each step of a PAC fetch. `None` when WinHTTP
+    /// will not open one.
+    #[must_use]
+    pub fn new(timeout: core::time::Duration) -> Option<Self> {
+        WinHttpResolver::new(timeout).map(|inner| Self { inner })
+    }
+}
+
+impl crate::ProxySource for WinHttpSource {
+    fn routes(&self, url: &str) -> Result<Option<Vec<Route>>, crate::Error> {
+        let target = Target::parse(url)?;
+        Ok(self.inner.lookup(url, &target))
+    }
+}

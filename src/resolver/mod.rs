@@ -23,6 +23,7 @@ use crate::env::{Environment, Source};
 use crate::error::Error;
 use crate::proxy::{Credentials, Proxy, ProxyScheme, Route, Target};
 use crate::settings::ResolverSettings;
+use crate::source::ProxySource;
 use crate::system::{SettingsState, SystemSettings};
 pub use child::ChildEnvironment;
 
@@ -34,6 +35,8 @@ pub enum ProxySetting {
     Proxy(Proxy),
     /// The PAC script at this location (a URL, a `file:` URL or a path) chooses.
     Pac(String),
+    /// These routes, in order: a PAC result written out (`PROXY a:1; DIRECT`).
+    Routes(Vec<Route>),
     /// No proxy at all.
     Direct,
 }
@@ -59,6 +62,7 @@ pub struct ResolverBuilder {
     settings: Option<SystemSettings>,
     credentials: Option<Credentials>,
     resolver_settings: ResolverSettings,
+    sources: Vec<Arc<dyn ProxySource>>,
 }
 
 impl ResolverBuilder {
@@ -72,6 +76,13 @@ impl ResolverBuilder {
     /// An explicit proxy, PAC location or "none", replacing the environment and the system.
     pub fn proxy(mut self, setting: ProxySetting) -> Self {
         self.setting = Some(setting);
+        self
+    }
+
+    /// Adds a source asked after the explicit proxy and before the environment and the system:
+    /// the first that has an opinion answers, and sources are asked in the order they were added.
+    pub fn source(mut self, source: impl ProxySource + 'static) -> Self {
+        self.sources.push(Arc::new(source));
         self
     }
 
@@ -141,11 +152,20 @@ impl ResolverBuilder {
         let no_proxy = self
             .no_proxy
             .or_else(|| variables.as_ref().map(crate::ProxyVariables::no_proxy))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .with_dns_timeout(self.resolver_settings.bypass_dns_timeout)
+            .with_interface_cache_ttl(self.resolver_settings.interface_cache_ttl);
         let variables = variables.filter(crate::ProxyVariables::has_proxies);
         let setting = self.setting.map(|setting| match setting {
             ProxySetting::Proxy(proxy) => Slot::Routes(alloc::vec![Route::Proxy(proxy)]),
-            ProxySetting::Pac(location) => Slot::pac(PacSource::Location(location)),
+            ProxySetting::Pac(location) => {
+                if location.contains("FindProxyForURL") {
+                    Slot::pac(PacSource::Text(location))
+                } else {
+                    Slot::pac(PacSource::Location(location))
+                }
+            }
+            ProxySetting::Routes(routes) => Slot::Routes(routes),
             ProxySetting::Direct => Slot::Routes(alloc::vec![Route::Direct]),
         });
         let system = (self.resolver_settings.system && setting.is_none() && variables.is_none())
@@ -158,6 +178,7 @@ impl ResolverBuilder {
                 no_proxy,
                 system,
                 credentials: self.credentials,
+                sources: self.sources,
                 settings: self.resolver_settings,
                 bad: Mutex::new(BTreeMap::new()),
             }),
@@ -182,6 +203,7 @@ struct Inner {
     no_proxy: BypassRules,
     system: Option<SystemSource>,
     credentials: Option<Credentials>,
+    sources: Vec<Arc<dyn ProxySource>>,
     settings: ResolverSettings,
     bad: Mutex<BTreeMap<String, Instant>>,
 }
@@ -200,6 +222,51 @@ impl Resolver {
         non_defaults(&self.inner.settings, &self.inner.no_proxy)
     }
 
+    /// The sources added with [`ResolverBuilder::source`], in the order they are asked.
+    #[must_use]
+    pub fn sources(&self) -> &[Arc<dyn ProxySource>] {
+        &self.inner.sources
+    }
+
+    /// The hosts that go direct.
+    #[must_use]
+    pub fn no_proxy(&self) -> &BypassRules {
+        &self.inner.no_proxy
+    }
+
+    /// How many URLs have an answer remembered.
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.inner
+            .system
+            .as_ref()
+            .map_or(0, SystemSource::cache_len)
+    }
+
+    /// The proxy for each scheme of a URL, as a client that keeps a table of them wants it: the
+    /// first proxy of the answer for the URL, keyed by the URL's scheme (a bypassed URL or a
+    /// direct answer has none). The path and query are not part of the decision.
+    ///
+    /// # Errors
+    ///
+    /// As [`Resolver::lookup`].
+    pub fn scheme_proxies(&self, url: &str) -> Result<BTreeMap<String, Proxy>, Error> {
+        let target = Target::parse(url)?;
+        let mut proxies = BTreeMap::new();
+        if let Some(Route::Proxy(proxy)) = self
+            .lookup(&alloc::format!(
+                "{}://{}/",
+                target.scheme,
+                crate::proxy::join_host_port(&target.host, target.port)
+            ))?
+            .into_iter()
+            .find(|route| matches!(route, Route::Proxy(proxy) if !proxy.is_gateway()))
+        {
+            proxies.insert(target.scheme.clone(), proxy);
+        }
+        Ok(proxies)
+    }
+
     /// The settings this resolver applies.
     #[must_use]
     pub fn settings(&self) -> &ResolverSettings {
@@ -215,6 +282,7 @@ impl Resolver {
             settings: None,
             credentials: None,
             resolver_settings: ResolverSettings::default(),
+            sources: Vec::new(),
         }
     }
 
@@ -235,6 +303,8 @@ impl Resolver {
             inner
                 .answer(setting, url, &target)?
                 .unwrap_or_else(|| alloc::vec![Route::Direct])
+        } else if let Some(routes) = inner.ask_sources(url)? {
+            routes
         } else if let Some(variables) = &inner.variables {
             match variables.source_for(&target) {
                 Some(source) => inner.env_answer(source, url, &target)?,
@@ -271,6 +341,16 @@ impl Resolver {
 }
 
 impl Inner {
+    /// The first answer of the added sources, or `None` when none has an opinion.
+    fn ask_sources(&self, url: &str) -> Result<Option<Vec<Route>>, Error> {
+        for source in &self.sources {
+            if let Some(routes) = source.routes(url)? {
+                return Ok(Some(routes));
+            }
+        }
+        Ok(None)
+    }
+
     /// Gives each proxy without a login the resolver's, and puts unhealthy proxies last.
     fn finish(&self, mut routes: Vec<Route>) -> Vec<Route> {
         if let Some(credentials) = &self.credentials {
@@ -489,6 +569,13 @@ impl SystemSource {
         }
     }
 
+    fn cache_len(&self) -> usize {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     fn clear(&self) {
         *self
             .cached
@@ -511,11 +598,16 @@ impl SystemSource {
         {
             return (Arc::clone(&current.settings), Arc::clone(&current.slots));
         }
-        let settings = Arc::new(
-            self.given
-                .clone()
-                .unwrap_or_else(|| SystemSettings::read_with(&self.settings.reader)),
-        );
+        let mut read = self
+            .given
+            .clone()
+            .unwrap_or_else(|| SystemSettings::read_with(&self.settings.reader));
+        read.bypass = read
+            .bypass
+            .clone()
+            .with_dns_timeout(self.settings.bypass_dns_timeout)
+            .with_interface_cache_ttl(self.settings.interface_cache_ttl);
+        let settings = Arc::new(read);
         let mut slots = Vec::new();
         if settings.state != SettingsState::Direct {
             if settings.auto_detect
