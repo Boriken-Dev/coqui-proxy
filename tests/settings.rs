@@ -248,3 +248,111 @@ fn what_is_looser_than_the_defaults_is_listed() {
             .is_empty()
     );
 }
+
+mod rotation_and_probe {
+    use std::net::TcpListener;
+
+    use coqui_proxy::{Environment, Error, Proxy, ProxySetting, Resolver, ResolverSettings, Route};
+
+    fn routes_of(ports: &[u16]) -> ProxySetting {
+        ProxySetting::Routes(
+            ports
+                .iter()
+                .map(|port| {
+                    Route::Proxy(Proxy::parse(&format!("http://127.0.0.1:{port}")).unwrap())
+                })
+                .collect(),
+        )
+    }
+
+    fn ports(routes: &[Route]) -> Vec<u16> {
+        routes
+            .iter()
+            .map(|route| match route {
+                Route::Proxy(proxy) => proxy.port(),
+                _ => 0,
+            })
+            .collect()
+    }
+
+    fn resolver(setting: ProxySetting, settings: ResolverSettings) -> Resolver {
+        Resolver::builder()
+            .environment(Environment::from_pairs([("X", "y")]))
+            .proxy(setting)
+            .resolver_settings(settings)
+            .build()
+    }
+
+    #[test]
+    fn rotation_starts_each_lookup_at_the_next_proxy() {
+        let plain = resolver(routes_of(&[1, 2, 3]), ResolverSettings::default());
+        assert_eq!(
+            ports(&plain.lookup("http://a.example/").unwrap()),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            ports(&plain.lookup("http://a.example/").unwrap()),
+            [1, 2, 3]
+        );
+
+        let mut settings = ResolverSettings::default();
+        settings.rotate = true;
+        let rotating = resolver(routes_of(&[1, 2, 3]), settings);
+        assert_eq!(
+            ports(&rotating.lookup("http://a.example/").unwrap()),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            ports(&rotating.lookup("http://a.example/").unwrap()),
+            [2, 3, 1]
+        );
+        assert_eq!(
+            ports(&rotating.lookup("http://b.example/").unwrap()),
+            [3, 1, 2]
+        );
+    }
+
+    #[test]
+    fn rotation_remembers_no_more_answers_than_rotation_capacity() {
+        let mut settings = ResolverSettings::default();
+        settings.rotate = true;
+        settings.rotation_capacity = 1;
+        let setting = routes_of(&[1, 2]);
+        let rotating = resolver(setting, settings);
+        assert_eq!(
+            ports(&rotating.lookup("http://a.example/").unwrap()),
+            [1, 2]
+        );
+        assert_eq!(
+            ports(&rotating.lookup("http://a.example/").unwrap()),
+            [2, 1]
+        );
+    }
+
+    fn dead_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn a_probe_puts_a_reachable_proxy_first_and_fails_when_none_is() {
+        let live = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_port = live.local_addr().unwrap().port();
+        let dead = dead_port();
+        let mut settings = ResolverSettings::default();
+        settings.probe = true;
+        settings.probe_timeout = std::time::Duration::from_secs(2);
+
+        let probing = resolver(routes_of(&[dead, live_port]), settings.clone());
+        assert_eq!(
+            ports(&probing.lookup("http://a.example/").unwrap())[0],
+            live_port
+        );
+
+        let hopeless = resolver(routes_of(&[dead, dead_port()]), settings);
+        assert!(matches!(
+            hopeless.lookup("http://a.example/"),
+            Err(Error::NoReachableProxy)
+        ));
+    }
+}

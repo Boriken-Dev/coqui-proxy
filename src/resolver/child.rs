@@ -341,7 +341,7 @@ fn plan(inner: &Inner) -> Plan {
         match setting {
             Slot::Routes(routes) => {
                 for class in classes {
-                    plan.set(class, &inner.finish(routes.clone()));
+                    plan.set(class, &inner.decorate(routes.clone()));
                 }
             }
             Slot::Pac(_) => plan.per_endpoint = true,
@@ -349,7 +349,7 @@ fn plan(inner: &Inner) -> Plan {
     } else if let Some(variables) = &inner.variables {
         for class in classes {
             match variables.source_for(&class.probe()) {
-                Some(Source::Routes(routes)) => plan.set(class, &inner.finish(routes)),
+                Some(Source::Routes(routes)) => plan.set(class, &inner.decorate(routes)),
                 Some(_) => plan.per_endpoint = true,
                 None => {}
             }
@@ -363,7 +363,10 @@ fn plan(inner: &Inner) -> Plan {
             plan.per_endpoint = true;
         } else {
             for class in classes {
-                plan.set(class, &inner.finish(settings.manual_routes(&class.probe())));
+                plan.set(
+                    class,
+                    &inner.decorate(settings.manual_routes(&class.probe())),
+                );
             }
             plan.bypass.push(settings.bypass.clone());
         }

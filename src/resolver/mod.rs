@@ -181,6 +181,8 @@ impl ResolverBuilder {
                 sources: self.sources,
                 settings: self.resolver_settings,
                 bad: Mutex::new(BTreeMap::new()),
+                rotations: Mutex::new(Rotations::default()),
+                probed: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -206,6 +208,8 @@ struct Inner {
     sources: Vec<Arc<dyn ProxySource>>,
     settings: ResolverSettings,
     bad: Mutex<BTreeMap<String, Instant>>,
+    rotations: Mutex<Rotations>,
+    probed: Mutex<BTreeMap<String, Instant>>,
 }
 
 impl Resolver {
@@ -315,7 +319,7 @@ impl Resolver {
         } else {
             alloc::vec![Route::Direct]
         };
-        Ok(inner.finish(routes))
+        inner.finish(routes)
     }
 
     /// Records that connecting to `proxy` failed: for five minutes it is tried after the others.
@@ -351,8 +355,20 @@ impl Inner {
         Ok(None)
     }
 
+    /// Gives each proxy without a login the resolver's, rotates and probes as the settings say.
+    fn finish(&self, routes: Vec<Route>) -> Result<Vec<Route>, Error> {
+        let mut routes = self.decorate(routes);
+        if self.settings.rotate {
+            self.rotate(&mut routes);
+        }
+        if self.settings.probe {
+            return self.probe(routes);
+        }
+        Ok(routes)
+    }
+
     /// Gives each proxy without a login the resolver's, and puts unhealthy proxies last.
-    fn finish(&self, mut routes: Vec<Route>) -> Vec<Route> {
+    fn decorate(&self, mut routes: Vec<Route>) -> Vec<Route> {
         if let Some(credentials) = &self.credentials {
             for route in &mut routes {
                 if let Route::Proxy(proxy) = route
@@ -375,6 +391,78 @@ impl Inner {
             });
         }
         routes
+    }
+
+    /// Turns the answer so each lookup of the same answer starts at the next proxy.
+    fn rotate(&self, routes: &mut [Route]) {
+        if routes.len() < 2 {
+            return;
+        }
+        let key: String = routes
+            .iter()
+            .map(|route| match route {
+                Route::Proxy(proxy) => proxy.authority(),
+                _ => "direct".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let offset = self
+            .rotations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next(&key, self.settings.rotation_capacity);
+        let length = routes.len();
+        routes.rotate_left(offset % length);
+    }
+
+    /// Keeps the routes that accept a connection, probing in order until one does: the rest follow
+    /// untried. A proxy that failed a probe is skipped for `probe_failure_memory`.
+    fn probe(&self, routes: Vec<Route>) -> Result<Vec<Route>, Error> {
+        let mut reachable = Vec::new();
+        let mut rest = routes.into_iter();
+        for route in rest.by_ref() {
+            let Route::Proxy(proxy) = &route else {
+                reachable.push(route);
+                break;
+            };
+            if self.probe_one(proxy) {
+                reachable.push(route);
+                break;
+            }
+        }
+        if reachable.is_empty() {
+            return Err(Error::NoReachableProxy);
+        }
+        reachable.extend(rest);
+        Ok(reachable)
+    }
+
+    fn probe_one(&self, proxy: &Proxy) -> bool {
+        let key = proxy.authority();
+        {
+            let mut failed = self
+                .probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            failed.retain(|_, at| at.elapsed() < self.settings.probe_failure_memory);
+            if failed.contains_key(&key) {
+                return false;
+            }
+        }
+        let reachable = std::net::ToSocketAddrs::to_socket_addrs(&(proxy.host(), proxy.port()))
+            .is_ok_and(|mut addresses| {
+                addresses.any(|address| {
+                    std::net::TcpStream::connect_timeout(&address, self.settings.probe_timeout)
+                        .is_ok()
+                })
+            });
+        if !reachable {
+            self.probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, Instant::now());
+        }
+        reachable
     }
 
     fn env_answer(&self, source: Source, url: &str, target: &Target) -> Result<Vec<Route>, Error> {
@@ -415,6 +503,35 @@ fn non_defaults(settings: &ResolverSettings, no_proxy: &BypassRules) -> Vec<Stri
         loose.push("<-loopback>: loopback hosts are sent through the proxy".to_string());
     }
     loose
+}
+
+/// How many times each answer was handed out, to rotate it; bounded by `rotation_capacity`.
+#[derive(Debug, Default)]
+struct Rotations {
+    next_order: u64,
+    counts: BTreeMap<String, (u64, usize)>,
+}
+
+impl Rotations {
+    /// The offset for this lookup of `key`, then counts it.
+    fn next(&mut self, key: &str, capacity: usize) -> usize {
+        if !self.counts.contains_key(key)
+            && self.counts.len() >= capacity
+            && let Some(oldest) = self
+                .counts
+                .iter()
+                .min_by_key(|(_, (order, _))| *order)
+                .map(|(key, _)| key.clone())
+        {
+            self.counts.remove(&oldest);
+        }
+        self.next_order += 1;
+        let order = self.next_order;
+        let entry = self.counts.entry(key.to_string()).or_insert((order, 0));
+        let offset = entry.1;
+        entry.1 += 1;
+        offset
+    }
 }
 
 /// Where a PAC script comes from.
