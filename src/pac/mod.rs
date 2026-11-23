@@ -26,6 +26,8 @@ use crate::proxy::{Route, Target};
 use crate::settings::PacSettings;
 
 mod builtins;
+mod source;
+pub use source::{FindProxy, PacSource};
 pub(crate) mod dhcp;
 pub(crate) mod fetch;
 pub(crate) mod wpad;
@@ -48,15 +50,22 @@ struct Worker {
     requests: Sender<Request>,
 }
 
+/// A builtin a caller adds to a script: it gets the call's arguments as text and answers text.
+pub type CustomFunction = Arc<dyn Fn(&[String]) -> Result<String, Error> + Send + Sync>;
+
 /// What the builtins of one script share: its name-lookup cache, kept across restarts of its worker.
 struct Shared {
     settings: PacSettings,
+    functions: Vec<(String, CustomFunction)>,
     dns: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
 /// The script state a builtin reaches; it holds nothing the collector owns.
 #[derive(Clone, boa_gc::Trace, boa_gc::Finalize)]
-struct Captured(#[unsafe_ignore_trace] Arc<Shared>);
+struct Captured(
+    #[unsafe_ignore_trace] Arc<Shared>,
+    #[unsafe_ignore_trace] usize,
+);
 
 struct State {
     worker: Option<Worker>,
@@ -85,18 +94,48 @@ impl core::fmt::Debug for PacScript {
 }
 
 /// Builds a [`PacScript`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[must_use]
 pub struct PacScriptBuilder {
     source: String,
     settings: PacSettings,
+    functions: Vec<(String, CustomFunction)>,
     clock: Option<i64>,
+}
+
+impl core::fmt::Debug for PacScriptBuilder {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PacScriptBuilder")
+            .field("bytes", &self.source.len())
+            .field("settings", &self.settings)
+            .field(
+                "functions",
+                &self
+                    .functions
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl PacScriptBuilder {
     /// The time limit of loading the script and of each call (default 5 seconds).
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.settings.call_timeout = timeout;
+        self
+    }
+
+    /// Adds a builtin `name` to the script, callable as `name(a, b)` from `FindProxyForURL`: the
+    /// arguments arrive as text and the answer is text. An error becomes a script error.
+    pub fn function(
+        mut self,
+        name: impl Into<String>,
+        function: impl Fn(&[String]) -> Result<String, Error> + Send + Sync + 'static,
+    ) -> Self {
+        self.functions.push((name.into(), Arc::new(function)));
         self
     }
 
@@ -124,6 +163,7 @@ impl PacScriptBuilder {
             source: self.source.into(),
             shared: Arc::new(Shared {
                 settings: self.settings,
+                functions: self.functions,
                 dns: Mutex::new(HashMap::new()),
             }),
             clock: self.clock,
@@ -144,6 +184,7 @@ impl PacScript {
         PacScriptBuilder {
             source: source.into(),
             settings: PacSettings::default(),
+            functions: Vec::new(),
             clock: None,
         }
     }
@@ -174,15 +215,56 @@ impl PacScript {
             }
             bytes
         };
-        let source = match String::from_utf8(bytes) {
-            Ok(text) => text.trim_start_matches('\u{feff}').to_string(),
-            Err(error) => error
-                .into_bytes()
-                .iter()
-                .map(|&byte| char::from(byte))
-                .collect(),
+        Self::builder(decode_text(bytes)).settings(settings).build()
+    }
+
+    /// The text of the script.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The time limit of loading the script and of each call.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.shared.settings.call_timeout
+    }
+
+    /// The script in the file at `path`, read as `encoding`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the file cannot be read, [`Error::Pac`] when it is over
+    /// `max_script_bytes`, is not valid UTF-8 for [`PacEncoding::Utf8`], or does not load.
+    pub fn from_file(
+        path: impl AsRef<std::path::Path>,
+        encoding: PacEncoding,
+        settings: &PacSettings,
+    ) -> Result<Self, Error> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() > settings.max_script_bytes {
+            return Err(pac_error("script too large"));
+        }
+        let source = match encoding {
+            PacEncoding::Latin1 => bytes.iter().map(|&byte| char::from(byte)).collect(),
+            PacEncoding::Utf8 => String::from_utf8(bytes)
+                .map_err(|_| pac_error("the script is not valid UTF-8"))?
+                .trim_start_matches('\u{feff}')
+                .to_string(),
         };
         Self::builder(source).settings(settings).build()
+    }
+
+    /// The script downloaded from the `http(s)` URL `url`, directly, never through a proxy. A
+    /// caller that wants the download reused keeps the [`PacScript`] (a [`Resolver`](crate::Resolver)
+    /// downloads again after `download_cache_ttl`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pac`] for a download that fails or a script that does not load.
+    pub fn from_url(url: &str, settings: &PacSettings) -> Result<Self, Error> {
+        let bytes = fetch::get(url, settings)?;
+        Self::builder(decode_text(bytes)).settings(settings).build()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -216,6 +298,12 @@ impl PacScript {
     /// [`Error::Pac`] when the script raises, overruns the time limit, or is being refused after an
     /// overrun.
     pub fn find_proxy_for_url(&self, url: &str, host: &str) -> Result<String, Error> {
+        let reduced = self
+            .shared
+            .settings
+            .browser_compatibility
+            .then(|| browser_url(url));
+        let url = reduced.as_deref().unwrap_or(url);
         let mut state = self.lock();
         if let Some(failed) = state.failed_at {
             if failed.elapsed() < self.shared.settings.refusal_after_overrun {
@@ -261,6 +349,80 @@ impl PacScript {
         let host = target.host.as_str();
         let text = self.find_proxy_for_url(url, host)?;
         Ok(Route::parse_pac_result(&text))
+    }
+}
+
+/// The WPAD answer of this machine: the first `wpad.dat` (DHCP option 252, then DNS devolution)
+/// that downloads and loads, or `None`. `fqdn` names the machine (default: its own name).
+///
+/// # Errors
+///
+/// Reserved for failures of the discovery itself; a location whose script fails is skipped.
+pub fn discover(fqdn: Option<&str>, settings: &PacSettings) -> Result<Option<PacScript>, Error> {
+    Ok(wpad::discover(fqdn, settings))
+}
+
+/// The names of the builtins every script has, those of the PAC specification and Microsoft's
+/// `*Ex` extensions.
+#[must_use]
+pub fn builtin_names() -> &'static [&'static str] {
+    &[
+        "convert_addr",
+        "dateRange",
+        "dnsDomainIs",
+        "dnsDomainLevels",
+        "dnsResolve",
+        "dnsResolveEx",
+        "getClientVersion",
+        "isInNet",
+        "isInNetEx",
+        "isPlainHostName",
+        "isResolvable",
+        "isResolvableEx",
+        "localHostOrDomainIs",
+        "myIpAddress",
+        "myIpAddressEx",
+        "shExpMatch",
+        "sortIpAddressList",
+        "timeRange",
+        "weekdayRange",
+    ]
+}
+
+/// How a script file is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PacEncoding {
+    /// UTF-8, a byte order mark dropped.
+    #[default]
+    Utf8,
+    /// ISO 8859-1: every byte is the character of that code.
+    Latin1,
+}
+
+/// UTF-8 (a byte order mark dropped), else Latin-1.
+fn decode_text(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text.trim_start_matches('\u{feff}').to_string(),
+        Err(error) => error
+            .into_bytes()
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect(),
+    }
+}
+
+/// `https://host/` for an `https:` URL, as browsers show a script: the path and query of a secure
+/// URL are not for a script to see. Any other URL is unchanged.
+fn browser_url(url: &str) -> String {
+    match Target::parse(url) {
+        Ok(target) if target.scheme == "https" => {
+            alloc::format!(
+                "https://{}/",
+                crate::proxy::join_host_port(&target.host, target.port)
+            )
+        }
+        _ => url.to_string(),
     }
 }
 
@@ -473,8 +635,29 @@ fn register(context: &mut Context, shared: &Arc<Shared>) -> JsResult<()> {
             Ok(builtins::convert_addr(&text(a, 0, c)?).map_or_else(JsValue::nan, JsValue::from))
         }),
     ];
+    for (index, (name, _)) in shared.functions.iter().enumerate() {
+        context.register_global_builtin_callable(
+            boa_engine::JsString::from(name.as_str()),
+            0,
+            NativeFunction::from_copy_closure_with_captures(
+                |_this, arguments, captured: &Captured, context| {
+                    let mut texts = Vec::new();
+                    for position in 0..arguments.len() {
+                        texts.push(text(arguments, position, context)?);
+                    }
+                    match (captured.0.functions[captured.1].1)(&texts) {
+                        Ok(answer) => Ok(string(&answer)),
+                        Err(error) => Err(boa_engine::JsNativeError::error()
+                            .with_message(error.to_string())
+                            .into()),
+                    }
+                },
+                Captured(Arc::clone(shared), index),
+            ),
+        )?;
+    }
     for (name, length, function) in natives {
-        let captures = Captured(Arc::clone(shared));
+        let captures = Captured(Arc::clone(shared), 0);
         context.register_global_builtin_callable(
             name,
             length,

@@ -459,6 +459,8 @@ struct PacState {
     script: Option<Arc<crate::pac::PacScript>>,
     #[cfg(feature = "pac")]
     failed_at: Option<Instant>,
+    #[cfg(feature = "pac")]
+    loaded_at: Option<Instant>,
 }
 
 impl PacSlot {
@@ -482,7 +484,15 @@ impl PacSlot {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.script.is_none()
+            let lifetime = match &self.source {
+                PacSource::Location(_) => Some(pac_settings.download_cache_ttl),
+                PacSource::Wpad => Some(pac_settings.wpad_cache_ttl),
+                PacSource::Text(_) => None,
+            };
+            let stale = lifetime
+                .zip(state.loaded_at)
+                .is_some_and(|(lifetime, at)| at.elapsed() >= lifetime);
+            if (state.script.is_none() || stale)
                 && state
                     .failed_at
                     .is_none_or(|failed| failed.elapsed() >= settings.source_retry)
@@ -498,7 +508,11 @@ impl PacSlot {
                     PacSource::Wpad => Ok(crate::pac::wpad::discover(None, &pac_settings)),
                 };
                 match loaded {
-                    Ok(Some(script)) => state.script = Some(Arc::new(script)),
+                    Ok(Some(script)) => {
+                        state.script = Some(Arc::new(script));
+                        state.loaded_at = Some(Instant::now());
+                        state.failed_at = None;
+                    }
                     Ok(None) => state.failed_at = Some(Instant::now()),
                     Err(error) => {
                         tracing::debug!(%error, "a pac source failed to load");
