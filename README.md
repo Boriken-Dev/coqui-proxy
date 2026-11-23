@@ -37,6 +37,8 @@ cargo add --git https://github.com/Boriken-Dev/coqui-proxy coqui-proxy
 | `tls` | `rustls` (ring), `rustls-platform-verifier`: `https:` proxies and PAC locations | off |
 | `negotiate` | Unix: `libgssapi`: Negotiate and NTLM login (Windows needs no crate) | off |
 | `libproxy` | `libloading`: `system::LibProxySource` (Unix) | off |
+| `tokio` | `tokio`, `tokio-rustls`: `asynch::ProxyConnector`, `asynch::lookup` | off |
+| `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service`: `hyper::Connector`, a `tower` service for hyper's client | off |
 
 ## Quick start
 
@@ -107,6 +109,8 @@ assert_eq!(resolver.lookup("https://a.corp.example/")?, [Route::Direct]);
 | `source` | `ProxySource`, `ChainSource`, `lookup`: anything that answers for a URL |
 | `system` | `SystemSettings`, `SystemSource`, `WinHttpSource`, `CfNetworkSource`, `LibProxySource` |
 | `pac` | `PacScript`, `PacSource`, `FindProxy`, `discover`, `builtin_names` (feature `pac`) |
+| `asynch` | the connector on Tokio: `ProxyConnector`, `Connection`, `lookup` (feature `tokio`) |
+| `hyper` | `Connector`, a `tower` service that returns a tunnel (feature `hyper`) |
 | `connect` | the sans-I/O cores: `core::{ConnectRequest, ConnectResponse, ProxyLogin}`, `socks::{Greeting, Request, Reply}` |
 | `auth` | `Negotiate`, `OriginAuth`, `OriginLogin`, `negotiate_available` |
 

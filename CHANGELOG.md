@@ -22,5 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Resolver::scheme_proxies`, `BypassRules` union, rotation and probing of answers.
 - PAC: custom builtins, files in UTF-8 or Latin-1, downloads, WPAD discovery, browser
   compatibility, reload of stale scripts.
+- `asynch` (feature `tokio`): the connector on Tokio over the same sans-I/O cores, Happy Eyeballs
+  (`ConnectorSettings::happy_eyeballs_delay`), `asynch::lookup`; `hyper::Connector` (feature
+  `hyper`), a `tower` service for hyper's client. `ConnectorSettings::{failover, bad_proxy_ttl}`
+  and `ProxyConnectorBuilder::{failover, bad_proxy_ttl}`: a connector remembers its own failed
+  proxies and can try only the first route.
 - Settings types for every bound (`ResolverSettings`, `ReaderSettings`, `PacSettings`,
   `ConnectorSettings`) and `non_defaults()` on resolvers and connectors.

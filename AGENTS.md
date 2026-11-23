@@ -14,6 +14,8 @@ MSRV Rust 1.89, edition 2024. A default build depends on `http`, `percent-encodi
 | `tls` | `rustls` (ring), `rustls-platform-verifier` | `https:` proxies and PAC locations; `ProxyConnectorBuilder::proxy_tls`, `PacSettings::tls` |
 | `negotiate` | Unix: `libgssapi` | Negotiate and NTLM login (Windows SSPI needs no crate) |
 | `libproxy` | Unix: `libloading` | `system::LibProxySource` |
+| `tokio` | `tokio`, `tokio-rustls` | `asynch::*`: the connector on Tokio (an `https:` proxy also needs `tls`) |
+| `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service` | `hyper::Connector` |
 
 Imports: the root re-exports `Resolver`, `ResolverBuilder`, `ProxySetting`, `OnMissingEngine`,
 `ChildEnvironment`, `Proxy`, `ProxyBuilder`, `ProxyScheme`, `Route`, `Credentials`, `Secret`,
@@ -181,17 +183,35 @@ discovers WPAD again after `wpad_cache_ttl`.
 
 ```rust
 ProxyConnector::default(); ProxyConnector::builder() -> ProxyConnectorBuilder
-ProxyConnectorBuilder::{timeout(Duration), user_agent(String), negotiate(Negotiate), settings(ConnectorSettings), proxy_tls(Arc<rustls::ClientConfig>) /*tls*/, non_defaults(), build()}
+ProxyConnectorBuilder::{failover(bool), bad_proxy_ttl(Duration), timeout(Duration), user_agent(String), negotiate(Negotiate), settings(ConnectorSettings), proxy_tls(Arc<rustls::ClientConfig>) /*tls*/, non_defaults(), build()}
 ProxyConnector::connect(&self, route: &Route, host: &str, port: u16) -> Result<Connection, Error>
 ProxyConnector::connect_url(&self, resolver: &Resolver, url: &str) -> Result<Connection, Error>
-ProxyConnector::{with_timeout(Duration), non_defaults()}
+ProxyConnector::{with_timeout(Duration), with_failover(bool, Duration), non_defaults()}
 enum Connection { Tcp(TcpStream), Tls(Box<StreamOwned<..>>) /*tls*/ }   // Read + Write; socket()
 ```
 
 `connect_url` takes the first route that works and reports each proxy that does not
-(`Resolver::report_failure`); a refused login stops the search. A plain `http:` origin is
+(`Resolver::report_failure`, and the connector's own memory: a clone of a connector shares it, a proxy
+that failed is tried last for `bad_proxy_ttl`, 300 s); with `failover(false)` only the first route is
+tried. A refused login stops the search. A plain `http:` origin is
 tunnelled too. With `tls`, an `https:` proxy is verified by the platform verifier unless
 `proxy_tls` gives a configuration.
+
+## Asynchronous connecting (`coqui_proxy::asynch`, feature `tokio`)
+
+```rust
+ProxyConnector::asynch(&self) -> asynch::ProxyConnector              // or asynch::ProxyConnector::from(connector)
+asynch::ProxyConnector::{connect(&Route, host, port), connect_url(&Resolver, url)}  // async fn -> Result<asynch::Connection, Error>
+asynch::ProxyConnector::{with_timeout(Duration), with_failover(bool, Duration), blocking() -> &ProxyConnector}
+asynch::lookup(&Resolver, url: &str) -> Result<Vec<Route>, Error>   // async; Resolver::lookup on spawn_blocking
+enum asynch::Connection { Tcp(tokio::net::TcpStream), Tls(Box<TlsStream<TcpStream>>) /*tls*/ }   // AsyncRead + AsyncWrite
+```
+
+The same settings, Negotiate policy, proxy TLS and failed-proxy memory as the blocking connector it
+is made from; Happy Eyeballs races addresses on tasks. It needs a Tokio runtime (multi-thread or
+current-thread) because the resolver is synchronous. `coqui_proxy::hyper::Connector::new(connector,
+resolver)` (feature `hyper`) is a `tower_service::Service<http::Uri>` answering `hyper::Tunnel`
+(hyper's `Read`/`Write`, `into_inner() -> asynch::Connection`); TLS to the origin is the caller's.
 
 The sans-I/O cores (`coqui_proxy::connect`): `core::{ConnectRequest, ConnectResponse, Progress<T>,
 ProxyLogin, Outcome, BodyFraming, decode_chunk_size}` and `socks::{Greeting, Method, PasswordLogin,
@@ -233,7 +253,7 @@ Every bound is a field with a `DEFAULT_*` constant; each type has `Default` and 
 | `::download_timeout`, `::max_redirects`, `::download_cache_ttl` | 10 s, 3, 300 s |
 | `::dns_timeout`, `::dns_cache_ttl`, `::dns_cache_capacity` | 2 s, 30 s, 256 |
 | `::wpad_probe_timeout`, `::browser_compatibility`, `::tls` | 3 s, false, system verifier |
-| `ConnectorSettings::timeout`, `::user_agent`, `::happy_eyeballs_delay` | 30 s, `coqui-proxy`, 250 ms |
+| `ConnectorSettings::timeout`, `::user_agent`, `::happy_eyeballs_delay`, `::failover`, `::bad_proxy_ttl` | 30 s, `coqui-proxy`, 250 ms, true, 300 s |
 | `::max_response_head_bytes`, `::max_response_headers`, `::max_response_body_bytes` | 64 KiB, 100, 64 KiB |
 | `Negotiate::max_legs`, `::max_token` | 5, 64 KiB |
 | `OriginAuth::max_body` | 1 MiB |
