@@ -30,7 +30,10 @@ pub use auth::{Negotiate, NegotiateBuilder, OriginAuth, OriginAuthBuilder, Origi
 pub use bypass::{BypassRules, Dialect};
 pub use connect::{Connection, ProxyConnector, ProxyConnectorBuilder};
 pub use env::{Environment, ProxyVariables};
-pub use error::{Error, Reason};
+pub use error::{Error, Reason, UnsupportedProxy};
 pub use proxy::{Credentials, Proxy, ProxyBuilder, ProxyScheme, Route, Secret};
 pub use resolver::{ChildEnvironment, OnMissingEngine, ProxySetting, Resolver, ResolverBuilder};
 pub use settings::{ConnectorSettings, PacSettings, ReaderSettings, ResolverSettings};
+
+/// This crate's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

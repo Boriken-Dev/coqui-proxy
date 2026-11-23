@@ -23,6 +23,13 @@ pub enum ProxyScheme {
     Socks4,
     /// SOCKS version 5.
     Socks5,
+    /// A URL-prefix gateway (`prefix+http`, `prefix+https`): the request goes to the gateway's URL
+    /// followed by the target URL, not through a tunnel. Connectors answer [`Error::Unsupported`];
+    /// an HTTP client adapter skips it to the next route.
+    Gateway {
+        /// Whether the gateway is reached over TLS.
+        tls: bool,
+    },
 }
 
 impl ProxyScheme {
@@ -32,6 +39,8 @@ impl ProxyScheme {
             Self::Http => 80,
             Self::Https => 443,
             Self::Socks4 | Self::Socks5 => 1080,
+            Self::Gateway { tls: false } => 80,
+            Self::Gateway { tls: true } => 443,
         }
     }
 
@@ -42,6 +51,8 @@ impl ProxyScheme {
             Self::Https => "https",
             Self::Socks4 => "socks4",
             Self::Socks5 => "socks5",
+            Self::Gateway { tls: false } => "prefix+http",
+            Self::Gateway { tls: true } => "prefix+https",
         }
     }
 
@@ -51,6 +62,8 @@ impl ProxyScheme {
             "https" => Some(Self::Https),
             "socks" | "socks4" | "socks4a" => Some(Self::Socks4),
             "socks5" | "socks5h" => Some(Self::Socks5),
+            "prefix+http" => Some(Self::Gateway { tls: false }),
+            "prefix+https" => Some(Self::Gateway { tls: true }),
             _ => None,
         }
     }
@@ -75,6 +88,18 @@ impl Secret {
     /// The secret itself.
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
     }
 }
 
@@ -122,6 +147,7 @@ pub struct Proxy {
     port: u16,
     credentials: Option<Credentials>,
     headers: Vec<(String, Secret)>,
+    path: Option<String>,
 }
 
 impl Proxy {
@@ -134,8 +160,36 @@ impl Proxy {
                 port,
                 credentials: None,
                 headers: Vec::new(),
+                path: None,
             },
         }
+    }
+
+    /// Whether this is a URL-prefix gateway rather than a proxy.
+    #[must_use]
+    pub fn is_gateway(&self) -> bool {
+        matches!(self.scheme, ProxyScheme::Gateway { .. })
+    }
+
+    /// A gateway's path (it starts with `/`); `None` for a proxy.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// The URL a gateway is asked for to fetch `target`: `scheme://host:port<path><target>`, the
+    /// target appended as given. `None` for a proxy.
+    #[must_use]
+    pub fn gateway_url(&self, target: &str) -> Option<String> {
+        let ProxyScheme::Gateway { tls } = self.scheme else {
+            return None;
+        };
+        let scheme = if tls { "https" } else { "http" };
+        Some(alloc::format!(
+            "{scheme}://{}{}{target}",
+            self.authority(),
+            self.path.as_deref().unwrap_or("/")
+        ))
     }
 
     /// The protocol the proxy speaks.
@@ -197,9 +251,19 @@ impl Proxy {
             ),
             None => (ProxyScheme::Http, text),
         };
-        let rest = rest.strip_suffix('/').unwrap_or(rest);
-        if rest.contains('/') || rest.contains('?') || rest.contains('#') {
-            return Err(Error::Parse("proxy: it has a path"));
+        let gateway = matches!(scheme, ProxyScheme::Gateway { .. });
+        let (rest, path) = match rest.find(['/', '?', '#']) {
+            Some(at) if gateway => (&rest[..at], Some(rest[at..].to_string())),
+            Some(at) if &rest[at..] == "/" => (&rest[..at], None),
+            Some(_) => return Err(Error::Parse("proxy: it has a path")),
+            None => (rest, gateway.then(|| "/".to_string())),
+        };
+        if let Some(path) = &path
+            && (!path.starts_with('/') || path.contains(['?', '#']))
+        {
+            return Err(Error::Parse(
+                "proxy: a gateway path is an absolute path without a query",
+            ));
         }
         let (userinfo, hostport) = match rest.rsplit_once('@') {
             Some((userinfo, hostport)) => (Some(userinfo), hostport),
@@ -235,6 +299,7 @@ impl Proxy {
             port,
             credentials,
             headers: Vec::new(),
+            path,
         })
     }
 
@@ -242,11 +307,12 @@ impl Proxy {
     pub fn url_with_credentials(&self) -> String {
         match &self.credentials {
             Some(credentials) => alloc::format!(
-                "{}://{}:{}@{}",
+                "{}://{}:{}@{}{}",
                 self.scheme,
                 utf8_percent_encode(credentials.username(), NON_ALPHANUMERIC),
                 utf8_percent_encode(credentials.password(), NON_ALPHANUMERIC),
-                self.authority()
+                self.authority(),
+                self.path.as_deref().unwrap_or("")
             ),
             None => self.to_string(),
         }
@@ -259,7 +325,13 @@ fn decode(text: &str) -> String {
 
 impl fmt::Display for Proxy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}://{}", self.scheme, self.authority())
+        write!(
+            formatter,
+            "{}://{}{}",
+            self.scheme,
+            self.authority(),
+            self.path.as_deref().unwrap_or("")
+        )
     }
 }
 
@@ -303,8 +375,14 @@ impl ProxyBuilder {
     /// A header sent to the proxy only (`Proxy-Authorization: Bearer ...`, for one). Names must
     /// be HTTP tokens and values free of line breaks; the proxy builds without a bad one and
     /// [`ProxyBuilder::build`] says which kind it was.
-    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.proxy.headers.push((name.into(), Secret::new(value)));
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<Secret>) -> Self {
+        self.proxy.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// A gateway's path: absolute, without a query (default `/`). A proxy has none.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.proxy.path = Some(path.into());
         self
     }
 
@@ -315,7 +393,23 @@ impl ProxyBuilder {
     /// [`Error::Parse`] for an empty host, a zero port, a header name that is not a token or a
     /// header value with a line break or NUL.
     pub fn build(self) -> Result<Proxy, Error> {
-        let proxy = self.proxy;
+        let mut proxy = self.proxy;
+        if proxy.is_gateway() {
+            let path = proxy.path.get_or_insert_with(|| "/".to_string());
+            if !path.starts_with('/') || path.contains(['?', '#']) {
+                return Err(Error::Parse(
+                    "proxy: a gateway path is an absolute path without a query",
+                ));
+            }
+        } else if proxy
+            .path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty() && path != "/")
+        {
+            return Err(Error::Parse("proxy: only a gateway has a path"));
+        } else {
+            proxy.path = None;
+        }
         if proxy.host.is_empty() {
             return Err(Error::Parse("proxy host"));
         }
@@ -366,6 +460,17 @@ impl Route {
                 routes.push(Self::Direct);
                 continue;
             }
+            if keyword.eq_ignore_ascii_case("prefix") {
+                let lower = target.to_ascii_lowercase();
+                let gateway = (lower.starts_with("http://") || lower.starts_with("https://"))
+                    .then(|| Proxy::parse(&alloc::format!("prefix+{target}")).ok())
+                    .flatten();
+                match gateway {
+                    Some(proxy) => routes.push(Self::Proxy(proxy)),
+                    None => tracing::warn!("ignoring an unusable PREFIX entry of a pac result"),
+                }
+                continue;
+            }
             let scheme = match keyword.to_ascii_uppercase().as_str() {
                 "PROXY" | "HTTP" => Some(ProxyScheme::Http),
                 "HTTPS" => Some(ProxyScheme::Https),
@@ -377,7 +482,7 @@ impl Route {
                 scheme.and_then(|scheme| Proxy::parse(&alloc::format!("{scheme}://{target}")).ok());
             match proxy {
                 Some(proxy) => routes.push(Self::Proxy(proxy)),
-                None => tracing::debug!("dropped an unusable entry of a pac result"),
+                None => tracing::warn!("ignoring an unusable entry of a pac result"),
             }
         }
         if routes.is_empty() {

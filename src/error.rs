@@ -1,7 +1,11 @@
 //! The crate's error type.
 
+use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
+
+use crate::proxy::Proxy;
 
 /// What can go wrong resolving a proxy, logging in to one or building a TLS configuration.
 ///
@@ -36,12 +40,73 @@ pub enum Error {
     /// `tls` feature, or an IPv6 address through SOCKS 4).
     #[error("no usable proxy: {0}")]
     Unsupported(Reason),
+    /// An HTTP client cannot use any of the proxies it was offered, and every one is listed with
+    /// the reason.
+    #[error("{0}")]
+    UnsupportedProxy(Box<UnsupportedProxy>),
     /// A TLS configuration, a keystore or a certificate could not be used.
     #[error("tls: {0}")]
     Tls(Reason),
     /// A network or file operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// The Cargo feature to enable when this is [`Error::MissingEngine`] (`pac`).
+    #[must_use]
+    pub fn missing_feature(&self) -> Option<&'static str> {
+        matches!(self, Self::MissingEngine).then_some("pac")
+    }
+}
+
+/// Why an HTTP client cannot use any proxy of an answer: the client, and each proxy with its
+/// reason. Nothing in it quotes a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedProxy {
+    client: String,
+    refused: Vec<(Proxy, String)>,
+}
+
+impl UnsupportedProxy {
+    /// Names the `client` and the `refused` proxies with the reason each was.
+    pub fn new(client: impl Into<String>, refused: Vec<(Proxy, String)>) -> Self {
+        Self {
+            client: client.into(),
+            refused,
+        }
+    }
+
+    /// The HTTP client that cannot use them.
+    #[must_use]
+    pub fn client(&self) -> &str {
+        &self.client
+    }
+
+    /// The proxies, without credentials in their text.
+    #[must_use]
+    pub fn proxies(&self) -> Vec<&Proxy> {
+        self.refused.iter().map(|(proxy, _)| proxy).collect()
+    }
+
+    /// The reason for each proxy, in the order of [`UnsupportedProxy::proxies`].
+    #[must_use]
+    pub fn reasons(&self) -> Vec<&str> {
+        self.refused
+            .iter()
+            .map(|(_, reason)| reason.as_str())
+            .collect()
+    }
+}
+
+impl fmt::Display for UnsupportedProxy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} cannot use the proxies offered", self.client)?;
+        for (proxy, reason) in &self.refused {
+            write!(formatter, "; {proxy}: {reason}")?;
+        }
+        Ok(())
+    }
 }
 
 /// A short, fixed or derived description of why something failed, free of input text.

@@ -163,6 +163,11 @@ impl ProxyConnector {
     }
 
     fn tunnel(&self, proxy: &Proxy, host: &str, port: u16) -> Result<Connection, Error> {
+        if proxy.is_gateway() {
+            return Err(Error::Unsupported(Reason::new(
+                "a URL-prefix gateway is asked for the URL, it is not a tunnel",
+            )));
+        }
         let mut tcp = self.connect_tcp(proxy.host(), proxy.port())?;
         if matches!(proxy.scheme(), ProxyScheme::Socks4 | ProxyScheme::Socks5) {
             connect(&mut tcp, proxy.scheme(), proxy.credentials(), host, port)?;
