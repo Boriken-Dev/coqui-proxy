@@ -1,0 +1,25 @@
+[package]
+name = "coqui-proxy"
+version = "0.0.0-alpha.0"
+description = "Which proxy a request should use, and a connection through it: the system's proxy settings, PAC and WPAD, bypass rules, proxy login and CONNECT/SOCKS connectors"
+readme = "README.md"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Boriken-Dev/coqui-proxy"
+keywords = ["proxy", "pac", "wpad", "socks", "system"]
+categories = ["network-programming"]
+# Git dependencies cannot be published to crates.io.
+publish = false
+exclude = [".*", "*.local.*", "/tools/"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+
+[dependencies]
+
+[dev-dependencies]
