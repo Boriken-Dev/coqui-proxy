@@ -8,3 +8,28 @@
     clippy::alloc_instead_of_core
 )]
 #![deny(unsafe_code)]
+
+extern crate alloc;
+
+pub mod auth;
+mod bypass;
+mod connect;
+mod env;
+mod error;
+mod netutil;
+#[cfg(feature = "pac")]
+pub mod pac;
+mod proxy;
+mod resolver;
+mod socks;
+pub mod system;
+#[cfg(feature = "tls")]
+mod tls;
+
+pub use auth::{Negotiate, NegotiateBuilder, OriginAuth, OriginAuthBuilder, OriginLogin};
+pub use bypass::{BypassRules, Dialect};
+pub use connect::{Connection, ProxyConnector, ProxyConnectorBuilder};
+pub use env::{Environment, ProxyVariables};
+pub use error::{Error, Reason};
+pub use proxy::{Credentials, Proxy, ProxyBuilder, ProxyScheme, Route, Secret};
+pub use resolver::{ChildEnvironment, OnMissingEngine, ProxySetting, Resolver, ResolverBuilder};
