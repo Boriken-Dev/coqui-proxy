@@ -174,6 +174,13 @@ impl BypassRules {
         self.skipped.iter().map(String::as_str)
     }
 
+    /// Whether the implicit loopback bypass is switched off (`<-loopback>`): loopback hosts then
+    /// go through the proxy like any other.
+    #[must_use]
+    pub fn loopback_proxied(&self) -> bool {
+        !self.loopback
+    }
+
     /// Whether the list has no entry that can match (loopback still bypasses).
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()

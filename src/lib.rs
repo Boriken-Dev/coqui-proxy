@@ -21,7 +21,7 @@ mod netutil;
 pub mod pac;
 mod proxy;
 mod resolver;
-mod settings;
+pub mod settings;
 pub mod system;
 #[cfg(feature = "tls")]
 mod tls;
@@ -33,4 +33,4 @@ pub use env::{Environment, ProxyVariables};
 pub use error::{Error, Reason};
 pub use proxy::{Credentials, Proxy, ProxyBuilder, ProxyScheme, Route, Secret};
 pub use resolver::{ChildEnvironment, OnMissingEngine, ProxySetting, Resolver, ResolverBuilder};
-pub use settings::ConnectorSettings;
+pub use settings::{ConnectorSettings, PacSettings, ReaderSettings, ResolverSettings};

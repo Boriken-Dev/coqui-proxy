@@ -22,17 +22,9 @@ use crate::bypass::BypassRules;
 use crate::env::{Environment, Source};
 use crate::error::Error;
 use crate::proxy::{Credentials, Proxy, ProxyScheme, Route, Target};
+use crate::settings::ResolverSettings;
 use crate::system::{SettingsState, SystemSettings};
 pub use child::ChildEnvironment;
-
-/// How long the system's settings are trusted before they are read again.
-const SETTINGS_MAX_AGE: Duration = Duration::from_secs(60);
-/// How long a PAC source that failed is left alone before it is tried again.
-#[cfg(feature = "pac")]
-const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// How long a proxy that refused a connection is tried last.
-const BAD_PROXY_TTL: Duration = Duration::from_secs(300);
-const ANSWER_CACHE: usize = 1024;
 
 /// What an explicit proxy setting says, replacing the environment and the system.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +56,9 @@ pub struct ResolverBuilder {
     environment: Option<Environment>,
     setting: Option<ProxySetting>,
     no_proxy: Option<BypassRules>,
-    system: bool,
     settings: Option<SystemSettings>,
-    wpad: bool,
     credentials: Option<Credentials>,
-    timeout: Duration,
-    on_missing_engine: OnMissingEngine,
+    resolver_settings: ResolverSettings,
 }
 
 impl ResolverBuilder {
@@ -94,7 +83,7 @@ impl ResolverBuilder {
 
     /// Whether the operating system's settings are consulted (default `true`).
     pub fn system(mut self, system: bool) -> Self {
-        self.system = system;
+        self.resolver_settings.system = system;
         self
     }
 
@@ -107,7 +96,7 @@ impl ResolverBuilder {
     /// Whether WPAD runs when the system has no settings at all (default `false`: it runs only
     /// when the settings switch auto-detection on).
     pub fn wpad(mut self, wpad: bool) -> Self {
-        self.wpad = wpad;
+        self.resolver_settings.wpad = wpad;
         self
     }
 
@@ -120,14 +109,29 @@ impl ResolverBuilder {
 
     /// The time limit of each WPAD probe and PAC download (default 10 seconds).
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.resolver_settings.timeout = timeout;
+        self
+    }
+
+    /// Every bound the resolver applies, at once (the setters above change one each).
+    pub fn resolver_settings(mut self, settings: ResolverSettings) -> Self {
+        self.resolver_settings = settings;
         self
     }
 
     /// What a PAC location does when no JavaScript engine can run it (default: an error).
     pub fn on_missing_engine(mut self, behaviour: OnMissingEngine) -> Self {
-        self.on_missing_engine = behaviour;
+        self.resolver_settings.on_missing_engine = behaviour;
         self
+    }
+
+    /// What the resolver this builder makes would do that is looser than the defaults.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<String> {
+        non_defaults(
+            &self.resolver_settings,
+            self.no_proxy.as_ref().unwrap_or(&BypassRules::default()),
+        )
     }
 
     /// The resolver. Nothing is fetched until the first lookup.
@@ -144,8 +148,8 @@ impl ResolverBuilder {
             ProxySetting::Pac(location) => Slot::pac(PacSource::Location(location)),
             ProxySetting::Direct => Slot::Routes(alloc::vec![Route::Direct]),
         });
-        let system = (self.system && setting.is_none() && variables.is_none())
-            .then(|| SystemSource::new(self.settings, self.wpad));
+        let system = (self.resolver_settings.system && setting.is_none() && variables.is_none())
+            .then(|| SystemSource::new(self.settings, &self.resolver_settings));
         Resolver {
             inner: Arc::new(Inner {
                 setting,
@@ -154,8 +158,7 @@ impl ResolverBuilder {
                 no_proxy,
                 system,
                 credentials: self.credentials,
-                timeout: self.timeout,
-                on_missing_engine: self.on_missing_engine,
+                settings: self.resolver_settings,
                 bad: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -179,8 +182,7 @@ struct Inner {
     no_proxy: BypassRules,
     system: Option<SystemSource>,
     credentials: Option<Credentials>,
-    timeout: Duration,
-    on_missing_engine: OnMissingEngine,
+    settings: ResolverSettings,
     bad: Mutex<BTreeMap<String, Instant>>,
 }
 
@@ -191,18 +193,28 @@ impl Resolver {
         Self::builder().build()
     }
 
+    /// What this resolver does that is looser than the defaults: an empty list is the strict
+    /// configuration.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<String> {
+        non_defaults(&self.inner.settings, &self.inner.no_proxy)
+    }
+
+    /// The settings this resolver applies.
+    #[must_use]
+    pub fn settings(&self) -> &ResolverSettings {
+        &self.inner.settings
+    }
+
     /// Starts a resolver.
     pub fn builder() -> ResolverBuilder {
         ResolverBuilder {
             environment: None,
             setting: None,
             no_proxy: None,
-            system: true,
             settings: None,
-            wpad: false,
             credentials: None,
-            timeout: Duration::from_secs(10),
-            on_missing_engine: OnMissingEngine::default(),
+            resolver_settings: ResolverSettings::default(),
         }
     }
 
@@ -275,7 +287,7 @@ impl Inner {
             .bad
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        bad.retain(|_, at| at.elapsed() < BAD_PROXY_TTL);
+        bad.retain(|_, at| at.elapsed() < self.settings.failure_memory);
         if !bad.is_empty() {
             routes.sort_by_key(|route| match route {
                 Route::Proxy(proxy) => bad.contains_key(&proxy.authority()),
@@ -307,9 +319,22 @@ impl Inner {
     fn answer(&self, slot: &Slot, url: &str, target: &Target) -> Result<Option<Vec<Route>>, Error> {
         match slot {
             Slot::Routes(routes) => Ok(Some(routes.clone())),
-            Slot::Pac(pac) => pac.routes(url, target, self.timeout, self.on_missing_engine),
+            Slot::Pac(pac) => pac.routes(url, target, &self.settings),
         }
     }
+}
+
+fn non_defaults(settings: &ResolverSettings, no_proxy: &BypassRules) -> Vec<String> {
+    let mut loose = Vec::new();
+    if settings.on_missing_engine == OnMissingEngine::Direct {
+        loose.push(
+            "on_missing_engine(Direct): a PAC location nothing can run answers direct".to_string(),
+        );
+    }
+    if no_proxy.loopback_proxied() {
+        loose.push("<-loopback>: loopback hosts are sent through the proxy".to_string());
+    }
+    loose
 }
 
 /// Where a PAC script comes from.
@@ -369,9 +394,9 @@ impl PacSlot {
         &self,
         url: &str,
         target: &Target,
-        timeout: Duration,
-        _on_missing_engine: OnMissingEngine,
+        settings: &ResolverSettings,
     ) -> Result<Option<Vec<Route>>, Error> {
+        let pac_settings = settings.pac_settings();
         let script = {
             let mut state = self
                 .state
@@ -380,16 +405,17 @@ impl PacSlot {
             if state.script.is_none()
                 && state
                     .failed_at
-                    .is_none_or(|failed| failed.elapsed() >= RETRY_AFTER)
+                    .is_none_or(|failed| failed.elapsed() >= settings.source_retry)
             {
                 let loaded = match &self.source {
                     PacSource::Location(location) => {
-                        crate::pac::PacScript::from_location(location, timeout).map(Some)
+                        crate::pac::PacScript::from_location(location, &pac_settings).map(Some)
                     }
                     PacSource::Text(text) => crate::pac::PacScript::builder(text.clone())
+                        .settings(&pac_settings)
                         .build()
                         .map(Some),
-                    PacSource::Wpad => Ok(crate::pac::wpad::discover(None, timeout)),
+                    PacSource::Wpad => Ok(crate::pac::wpad::discover(None, &pac_settings)),
                 };
                 match loaded {
                     Ok(Some(script)) => state.script = Some(Arc::new(script)),
@@ -419,11 +445,10 @@ impl PacSlot {
         &self,
         _url: &str,
         _target: &Target,
-        _timeout: Duration,
-        on_missing_engine: OnMissingEngine,
+        settings: &ResolverSettings,
     ) -> Result<Option<Vec<Route>>, Error> {
         let _ = (&self.source, &self.state);
-        match on_missing_engine {
+        match settings.on_missing_engine {
             OnMissingEngine::Error => Err(Error::MissingEngine),
             OnMissingEngine::Direct => Ok(Some(alloc::vec![Route::Direct])),
         }
@@ -434,7 +459,7 @@ impl PacSlot {
 #[derive(Debug)]
 struct SystemSource {
     given: Option<SystemSettings>,
-    wpad: bool,
+    settings: ResolverSettings,
     cached: Mutex<Option<Cached>>,
     answers: Mutex<BTreeMap<String, (Instant, Vec<Route>)>>,
     #[cfg(windows)]
@@ -449,16 +474,16 @@ struct Cached {
 }
 
 impl SystemSource {
-    fn new(given: Option<SystemSettings>, wpad: bool) -> Self {
+    fn new(given: Option<SystemSettings>, settings: &ResolverSettings) -> Self {
         Self {
             #[cfg(windows)]
             winhttp: if given.is_none() {
-                crate::system::winhttp::WinHttpResolver::new()
+                crate::system::winhttp::WinHttpResolver::new(settings.reader.winhttp_timeout)
             } else {
                 None
             },
             given,
-            wpad,
+            settings: settings.clone(),
             cached: Mutex::new(None),
             answers: Mutex::new(BTreeMap::new()),
         }
@@ -475,21 +500,27 @@ impl SystemSource {
             .clear();
     }
 
-    /// The settings and the PAC slots built from them, read again after [`SETTINGS_MAX_AGE`].
+    /// The settings and the PAC slots built from them, read again after `settings_refresh`.
     fn settings(&self) -> (Arc<SystemSettings>, Arc<Vec<Slot>>) {
         let mut cached = self
             .cached
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(current) = cached.as_ref()
-            && (self.given.is_some() || current.at.elapsed() < SETTINGS_MAX_AGE)
+            && (self.given.is_some() || current.at.elapsed() < self.settings.settings_refresh)
         {
             return (Arc::clone(&current.settings), Arc::clone(&current.slots));
         }
-        let settings = Arc::new(self.given.clone().unwrap_or_else(SystemSettings::read));
+        let settings = Arc::new(
+            self.given
+                .clone()
+                .unwrap_or_else(|| SystemSettings::read_with(&self.settings.reader)),
+        );
         let mut slots = Vec::new();
         if settings.state != SettingsState::Direct {
-            if settings.auto_detect || (self.wpad && settings.state == SettingsState::Unset) {
+            if settings.auto_detect
+                || (self.settings.wpad && settings.state == SettingsState::Unset)
+            {
                 slots.push(Slot::pac(PacSource::Wpad));
             }
             if let Some(url) = &settings.pac_url {
@@ -509,13 +540,20 @@ impl SystemSource {
     }
 
     fn lookup(&self, inner: &Inner, url: &str, target: &Target) -> Result<Vec<Route>, Error> {
+        let Some(ttl) = self
+            .settings
+            .cache_ttl
+            .filter(|_| self.settings.cache_capacity > 0)
+        else {
+            return self.resolve(inner, url, target);
+        };
         {
             let mut answers = self
                 .answers
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((at, routes)) = answers.get(url) {
-                if at.elapsed() < SETTINGS_MAX_AGE {
+                if at.elapsed() < ttl {
                     return Ok(routes.clone());
                 }
                 answers.remove(url);
@@ -526,8 +564,13 @@ impl SystemSource {
             .answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if answers.len() >= ANSWER_CACHE {
-            answers.clear();
+        if answers.len() >= self.settings.cache_capacity
+            && let Some(oldest) = answers
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(url, _)| url.clone())
+        {
+            answers.remove(&oldest);
         }
         answers.insert(url.to_string(), (Instant::now(), routes.clone()));
         Ok(routes)

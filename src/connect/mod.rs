@@ -2,7 +2,8 @@
 //! Basic credentials, a proxy's extra headers, or Negotiate and NTLM, or a SOCKS tunnel.
 
 use ::core::time::Duration;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
@@ -101,6 +102,18 @@ impl ProxyConnectorBuilder {
         self
     }
 
+    /// Every bound the connector applies, at once.
+    pub fn settings(mut self, settings: ConnectorSettings) -> Self {
+        self.connector.settings = settings;
+        self
+    }
+
+    /// What the connector this builder makes does that is looser than the defaults.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<String> {
+        self.connector.non_defaults()
+    }
+
     /// The TLS configuration for speaking to an `https:` proxy (default: the system's).
     #[cfg(feature = "tls")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
@@ -132,6 +145,20 @@ impl ProxyConnector {
                 proxy_tls: None,
             },
         }
+    }
+
+    /// What this connector does that is looser than the defaults: an empty list is the strict
+    /// configuration.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<String> {
+        let mut loose = Vec::new();
+        if self.negotiate.as_ref().is_some_and(Negotiate::plain_http) {
+            loose.push(
+                "Negotiate::plain_http(true): a Negotiate or NTLM login may cross plain http"
+                    .to_string(),
+            );
+        }
+        loose
     }
 
     /// The same connector with another time limit.

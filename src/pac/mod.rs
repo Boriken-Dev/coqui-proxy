@@ -22,6 +22,7 @@ use boa_engine::{Context, JsArgs, JsResult, JsValue, NativeFunction, Source, js_
 use crate::error::{Error, Reason};
 use crate::netutil::wildcard_match;
 use crate::proxy::{Route, Target};
+use crate::settings::PacSettings;
 use dns::{resolve, resolve_all};
 
 mod builtins;
@@ -30,18 +31,10 @@ mod dns;
 pub(crate) mod fetch;
 pub(crate) mod wpad;
 
-pub use fetch::MAX_PAC_BYTES;
+/// The default largest script, [`PacSettings::max_script_bytes`].
+pub const DEFAULT_MAX_PAC_BYTES: usize = PacSettings::DEFAULT_MAX_SCRIPT_BYTES;
 
 const PRELUDE: &str = include_str!("prelude.js");
-/// How long each name lookup a builtin makes may take: a script's own budget is not spent on DNS.
-const DNS_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long `dnsResolve` remembers an answer, a failure included.
-const DNS_TTL: Duration = Duration::from_secs(30);
-/// How long a script that overran is refused before it is started afresh.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
-const LOOP_LIMIT: u64 = 20_000_000;
-const RECURSION_LIMIT: usize = 400;
-
 fn pac_error(text: impl Into<String>) -> Error {
     Error::Pac(Reason::new(text))
 }
@@ -58,6 +51,7 @@ struct Worker {
 
 /// What the builtins of one script share: its name-lookup cache, kept across restarts of its worker.
 struct Shared {
+    settings: PacSettings,
     dns: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
@@ -77,7 +71,6 @@ struct State {
 pub struct PacScript {
     source: Arc<str>,
     shared: Arc<Shared>,
-    timeout: Duration,
     clock: Option<i64>,
     state: Mutex<State>,
 }
@@ -87,7 +80,7 @@ impl core::fmt::Debug for PacScript {
         formatter
             .debug_struct("PacScript")
             .field("bytes", &self.source.len())
-            .field("timeout", &self.timeout)
+            .field("timeout", &self.shared.settings.call_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -97,14 +90,20 @@ impl core::fmt::Debug for PacScript {
 #[must_use]
 pub struct PacScriptBuilder {
     source: String,
-    timeout: Duration,
+    settings: PacSettings,
     clock: Option<i64>,
 }
 
 impl PacScriptBuilder {
     /// The time limit of loading the script and of each call (default 5 seconds).
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.settings.call_timeout = timeout;
+        self
+    }
+
+    /// Every bound the script runs under, at once.
+    pub fn settings(mut self, settings: &PacSettings) -> Self {
+        self.settings = settings.clone();
         self
     }
 
@@ -125,9 +124,9 @@ impl PacScriptBuilder {
         let script = PacScript {
             source: self.source.into(),
             shared: Arc::new(Shared {
+                settings: self.settings,
                 dns: Mutex::new(HashMap::new()),
             }),
-            timeout: self.timeout,
             clock: self.clock,
             state: Mutex::new(State {
                 worker: None,
@@ -145,23 +144,23 @@ impl PacScript {
     pub fn builder(source: impl Into<String>) -> PacScriptBuilder {
         PacScriptBuilder {
             source: source.into(),
-            timeout: Duration::from_secs(5),
+            settings: PacSettings::default(),
             clock: None,
         }
     }
 
     /// Loads the script at `location`: an `http(s)` URL (downloaded directly, never through a
     /// proxy; `https` needs the `tls` feature), a `file:` URL or a path. A body over
-    /// [`MAX_PAC_BYTES`] is refused; text is UTF-8, else Latin-1.
+    /// `max_script_bytes` is refused; text is UTF-8, else Latin-1.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] when the file cannot be read, [`Error::Pac`] for a download that fails or a
     /// script that does not load.
-    pub fn from_location(location: &str, timeout: Duration) -> Result<Self, Error> {
+    pub fn from_location(location: &str, settings: &PacSettings) -> Result<Self, Error> {
         let location = location.trim();
         let bytes = if location.starts_with("http://") || location.starts_with("https://") {
-            fetch::get(location, timeout)?
+            fetch::get(location, settings)?
         } else {
             let path = location.strip_prefix("file:").unwrap_or(location);
             let path = path.strip_prefix("//").unwrap_or(path);
@@ -171,7 +170,7 @@ impl PacScript {
                 _ => path,
             };
             let bytes = std::fs::read(path)?;
-            if bytes.len() > MAX_PAC_BYTES {
+            if bytes.len() > settings.max_script_bytes {
                 return Err(pac_error("script too large"));
             }
             bytes
@@ -184,7 +183,7 @@ impl PacScript {
                 .map(|&byte| char::from(byte))
                 .collect(),
         };
-        Self::builder(source).build()
+        Self::builder(source).settings(settings).build()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -203,7 +202,7 @@ impl PacScript {
             .name("coqui-proxy-pac".into())
             .stack_size(16 << 20)
             .spawn(move || run_worker(&source, clock, &shared, &ready_sender, &incoming))?;
-        match ready.recv_timeout(self.timeout) {
+        match ready.recv_timeout(self.shared.settings.call_timeout) {
             Ok(Ok(())) => Ok(Worker { requests }),
             Ok(Err(message)) => Err(pac_error(message)),
             Err(_) => Err(pac_error("loading the script timed out")),
@@ -220,7 +219,7 @@ impl PacScript {
     pub fn find_proxy_for_url(&self, url: &str, host: &str) -> Result<String, Error> {
         let mut state = self.lock();
         if let Some(failed) = state.failed_at {
-            if failed.elapsed() < RETRY_AFTER {
+            if failed.elapsed() < self.shared.settings.refusal_after_overrun {
                 return Err(pac_error("the script overran its time limit"));
             }
             state.failed_at = None;
@@ -241,7 +240,7 @@ impl PacScript {
             state.worker = None;
             return Err(pac_error("the script stopped"));
         }
-        match answer.recv_timeout(self.timeout) {
+        match answer.recv_timeout(self.shared.settings.call_timeout) {
             Ok(Ok(text)) => Ok(text),
             Ok(Err(message)) => Err(pac_error(message)),
             Err(_) => {
@@ -299,8 +298,8 @@ fn describe(error: &boa_engine::JsError, context: &mut Context) -> String {
 fn load(source: &str, clock: Option<i64>, shared: &Arc<Shared>) -> Result<Context, String> {
     let mut context = Context::default();
     let limits = context.runtime_limits_mut();
-    limits.set_loop_iteration_limit(LOOP_LIMIT);
-    limits.set_recursion_limit(RECURSION_LIMIT);
+    limits.set_loop_iteration_limit(shared.settings.loop_iterations);
+    limits.set_recursion_limit(shared.settings.recursion);
     register(&mut context, shared).map_err(|error| describe(&error, &mut context))?;
     context
         .eval(Source::from_bytes(PRELUDE))
@@ -360,12 +359,22 @@ fn dns_resolve(shared: &Shared, host: &str) -> Option<String> {
         .dns
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ttl = shared.settings.dns_cache_ttl;
     if let Some((at, answer)) = cache.get(host)
-        && at.elapsed() < DNS_TTL
+        && at.elapsed() < ttl
     {
         return answer.clone();
     }
-    let answer = resolve(host, DNS_TIMEOUT).map(|address| address.to_string());
+    let answer = resolve(host, shared.settings.dns_timeout).map(|address| address.to_string());
+    cache.retain(|_, (at, _)| at.elapsed() < ttl);
+    if cache.len() >= shared.settings.dns_cache_capacity
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(name, _)| name.clone())
+    {
+        cache.remove(&oldest);
+    }
     cache.insert(host.to_string(), (Instant::now(), answer.clone()));
     answer
 }
@@ -387,40 +396,40 @@ fn register(context: &mut Context, shared: &Arc<Shared>) -> JsResult<()> {
             Ok(dns_resolve(s, &text(a, 0, c)?)
                 .map_or_else(JsValue::null, |address| string(&address)))
         }),
-        (js_string!("dnsResolveEx"), 1, |_s, _, a, c| {
-            let list: Vec<String> = resolve_all(&text(a, 0, c)?, DNS_TIMEOUT)
+        (js_string!("dnsResolveEx"), 1, |s, _, a, c| {
+            let list: Vec<String> = resolve_all(&text(a, 0, c)?, s.settings.dns_timeout)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
             Ok(string(&list.join("; ")))
         }),
-        (js_string!("myIpAddress"), 0, |_s, _, _, _| {
-            Ok(string(&resolve(&local_name(), DNS_TIMEOUT).map_or_else(
-                || "127.0.0.1".to_string(),
-                |a| a.to_string(),
-            )))
+        (js_string!("myIpAddress"), 0, |s, _, _, _| {
+            Ok(string(
+                &resolve(&local_name(), s.settings.dns_timeout)
+                    .map_or_else(|| "127.0.0.1".to_string(), |a| a.to_string()),
+            ))
         }),
-        (js_string!("myIpAddressEx"), 0, |_s, _, _, _| {
-            let list: Vec<String> = resolve_all(&local_name(), DNS_TIMEOUT)
+        (js_string!("myIpAddressEx"), 0, |s, _, _, _| {
+            let list: Vec<String> = resolve_all(&local_name(), s.settings.dns_timeout)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
             Ok(string(&list.join("; ")))
         }),
-        (js_string!("isResolvable"), 1, |_s, _, a, c| {
+        (js_string!("isResolvable"), 1, |s, _, a, c| {
             Ok(JsValue::from(
-                resolve(&text(a, 0, c)?, DNS_TIMEOUT).is_some(),
+                resolve(&text(a, 0, c)?, s.settings.dns_timeout).is_some(),
             ))
         }),
-        (js_string!("isResolvableEx"), 1, |_s, _, a, c| {
+        (js_string!("isResolvableEx"), 1, |s, _, a, c| {
             Ok(JsValue::from(
-                !resolve_all(&text(a, 0, c)?, DNS_TIMEOUT).is_empty(),
+                !resolve_all(&text(a, 0, c)?, s.settings.dns_timeout).is_empty(),
             ))
         }),
-        (js_string!("isInNet"), 3, |_s, _, a, c| {
+        (js_string!("isInNet"), 3, |s, _, a, c| {
             let host = text(a, 0, c)?;
             let (pattern, mask) = (text(a, 1, c)?, text(a, 2, c)?);
-            Ok(JsValue::from(resolve_to_address(_s, &host).is_some_and(
+            Ok(JsValue::from(resolve_to_address(s, &host).is_some_and(
                 |address| builtins::is_in_net(address, &pattern, &mask),
             )))
         }),

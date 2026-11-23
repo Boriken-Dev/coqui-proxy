@@ -23,10 +23,6 @@ use super::wininet::{InternetOptions, routes_from_winhttp_list, settings_from};
 use crate::proxy::{Route, Target};
 
 const ERROR_WINHTTP_LOGIN_FAILURE: u32 = 12015;
-/// Milliseconds for name resolution, connect, send and receive on the session WinHTTP fetches a
-/// PAC file with; its own resolve default is unbounded.
-const SESSION_TIMEOUT_MS: i32 = 10_000;
-
 /// Reads a NUL-terminated wide string WinHTTP allocated, then frees it.
 ///
 /// # Safety
@@ -124,8 +120,10 @@ mod ptr_wrapper {
 }
 
 impl WinHttpResolver {
-    /// Opens a session, or `None` when WinHTTP will not.
-    pub(crate) fn new() -> Option<Self> {
+    /// Opens a session, or `None` when WinHTTP will not. `timeout` bounds name resolution, connect,
+    /// send and receive on it (WinHTTP's own resolve default is unbounded).
+    pub(crate) fn new(timeout: core::time::Duration) -> Option<Self> {
+        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
         let agent = wide("coqui-proxy");
         // SAFETY: `agent` is a NUL-terminated wide string that outlives the call; the proxy
         // arguments are null, as the no-proxy access type requires.
@@ -143,13 +141,7 @@ impl WinHttpResolver {
         }
         // SAFETY: `session` is the valid handle just opened.
         unsafe {
-            WinHttpSetTimeouts(
-                session,
-                SESSION_TIMEOUT_MS,
-                SESSION_TIMEOUT_MS,
-                SESSION_TIMEOUT_MS,
-                SESSION_TIMEOUT_MS,
-            );
+            WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
         }
         Some(Self {
             session: ptr_wrapper::Session(session),

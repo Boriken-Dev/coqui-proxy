@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use crate::bypass::BypassRules;
 use crate::proxy::{Proxy, ProxyScheme, Route, Target};
+pub use crate::settings::ReaderSettings;
 
 #[cfg(any(target_os = "macos", test))]
 mod macos;
@@ -101,12 +102,19 @@ impl SystemSettings {
     /// Unix systems ask GNOME, MATE, KDE and NetworkManager, the first with a proxy configured
     /// winning, else the first with settings. A program that cannot run reads as no settings.
     pub fn read() -> Self {
+        Self::read_with(&ReaderSettings::default())
+    }
+
+    /// Reads the operating system's proxy settings, as `reader` says to.
+    pub fn read_with(reader: &ReaderSettings) -> Self {
         #[cfg(windows)]
         let settings = winhttp::read_settings();
         #[cfg(target_os = "macos")]
-        let settings = macos::read();
+        let settings = macos::read(reader);
         #[cfg(all(unix, not(target_os = "macos")))]
-        let settings = posix::read();
+        let settings = posix::read(reader);
+        #[cfg(not(any(unix)))]
+        let _ = reader;
         #[cfg(not(any(windows, unix)))]
         let settings: Option<Self> = None;
         let settings = settings.unwrap_or_default();
@@ -304,6 +312,13 @@ mod tests {
 
     #[test]
     fn a_program_that_is_not_installed_reads_as_no_output() {
-        assert_eq!(process::run("coqui-proxy-no-such-program", &[]), None);
+        assert_eq!(
+            process::run(
+                "coqui-proxy-no-such-program",
+                &[],
+                core::time::Duration::from_secs(5)
+            ),
+            None
+        );
     }
 }

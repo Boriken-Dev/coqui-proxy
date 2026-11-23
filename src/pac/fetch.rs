@@ -9,21 +9,17 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Instant;
 
 use crate::error::{Error, Reason};
-
-/// The largest PAC script read; a longer body is an error.
-pub const MAX_PAC_BYTES: usize = 1 << 20;
-
-const MAX_REDIRECTS: usize = 3;
+use crate::settings::PacSettings;
 
 fn pac_error(text: &'static str) -> Error {
     Error::Pac(Reason::new(text))
 }
 
-/// The body of `url` (`http` or, with the `tls` feature, `https`), within `timeout` for each step.
-pub(crate) fn get(url: &str, timeout: Duration) -> Result<Vec<u8>, Error> {
+/// The body of `url` (`http` or, with the `tls` feature, `https`), within `download_timeout` for each step, following `max_redirects` redirects.
+pub(crate) fn get(url: &str, settings: &PacSettings) -> Result<Vec<u8>, Error> {
     let mut url = url.to_string();
-    for _ in 0..=MAX_REDIRECTS {
-        let (status, location, body) = get_once(&url, timeout)?;
+    for _ in 0..=settings.max_redirects {
+        let (status, location, body) = get_once(&url, settings)?;
         match status {
             200 => return Ok(body),
             301 | 302 | 307 | 308 => {
@@ -106,8 +102,9 @@ fn connect(location: &Location, timeout: Duration) -> Result<TcpStream, Error> {
     Err(last.map_or_else(|| pac_error("no address"), Error::Io))
 }
 
-fn get_once(url: &str, timeout: Duration) -> Result<(u16, Option<String>, Vec<u8>), Error> {
+fn get_once(url: &str, settings: &PacSettings) -> Result<(u16, Option<String>, Vec<u8>), Error> {
     let location = split(url)?;
+    let timeout = settings.download_timeout;
     let stream = connect(&location, timeout)?;
     let default_port = if location.tls { 443 } else { 80 };
     let host_header = if location.port == default_port {
@@ -121,13 +118,19 @@ fn get_once(url: &str, timeout: Duration) -> Result<(u16, Option<String>, Vec<u8
     );
     let deadline = Instant::now() + timeout * 3;
     let raw = if location.tls {
-        read_tls(stream, &location.host, request.as_bytes(), deadline)?
+        read_tls(
+            stream,
+            &location.host,
+            request.as_bytes(),
+            deadline,
+            settings,
+        )?
     } else {
         let mut stream = stream;
         stream.write_all(request.as_bytes())?;
-        read_all(&mut stream, deadline)?
+        read_all(&mut stream, deadline, settings.max_script_bytes)?
     };
-    parse_response(&raw)
+    parse_response(&raw, settings.max_script_bytes)
 }
 
 #[cfg(feature = "tls")]
@@ -136,14 +139,18 @@ fn read_tls(
     host: &str,
     request: &[u8],
     deadline: Instant,
+    settings: &PacSettings,
 ) -> Result<Vec<u8>, Error> {
-    let config = crate::tls::platform_config()?;
+    let config = match &settings.tls {
+        Some(config) => alloc::sync::Arc::clone(config),
+        None => crate::tls::platform_config()?,
+    };
     let name =
         rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| pac_error("host"))?;
     let connection = rustls::ClientConnection::new(config, name).map_err(|_| pac_error("tls"))?;
     let mut tls = rustls::StreamOwned::new(connection, stream);
     tls.write_all(request)?;
-    read_all(&mut tls, deadline)
+    read_all(&mut tls, deadline, settings.max_script_bytes)
 }
 
 #[cfg(not(feature = "tls"))]
@@ -152,11 +159,12 @@ fn read_tls(
     _host: &str,
     _request: &[u8],
     _deadline: Instant,
+    _settings: &PacSettings,
 ) -> Result<Vec<u8>, Error> {
     Err(pac_error("an https location needs the `tls` feature"))
 }
 
-fn read_all(reader: &mut impl Read, deadline: Instant) -> Result<Vec<u8>, Error> {
+fn read_all(reader: &mut impl Read, deadline: Instant, max: usize) -> Result<Vec<u8>, Error> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -170,14 +178,14 @@ fn read_all(reader: &mut impl Read, deadline: Instant) -> Result<Vec<u8>, Error>
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(error) => return Err(Error::Io(error)),
         }
-        if data.len() > MAX_PAC_BYTES + 16 * 1024 {
+        if data.len() > max.saturating_add(16 * 1024) {
             return Err(pac_error("script too large"));
         }
     }
     Ok(data)
 }
 
-fn parse_response(raw: &[u8]) -> Result<(u16, Option<String>, Vec<u8>), Error> {
+fn parse_response(raw: &[u8], max: usize) -> Result<(u16, Option<String>, Vec<u8>), Error> {
     let end = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -209,7 +217,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Option<String>, Vec<u8>), Error> {
     } else {
         body.to_vec()
     };
-    if body.len() > MAX_PAC_BYTES {
+    if body.len() > max {
         return Err(pac_error("script too large"));
     }
     Ok((status, location, body))
@@ -262,7 +270,8 @@ mod tests {
     #[test]
     fn a_response_head_gives_the_status_location_and_body() {
         let raw = b"HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n";
-        let (status, location, body) = parse_response(raw).unwrap();
+        let (status, location, body) =
+            parse_response(raw, PacSettings::DEFAULT_MAX_SCRIPT_BYTES).unwrap();
         assert_eq!(
             (status, location.as_deref(), body.len()),
             (302, Some("/next"), 0)

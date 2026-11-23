@@ -7,12 +7,16 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+#[cfg(all(unix, not(target_os = "macos")))]
+use core::time::Duration;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use super::process::run;
 use super::{SettingsSource, SettingsState, SystemSettings, proxy_at, proxy_from};
 use crate::bypass::{BypassRules, Dialect};
 use crate::proxy::ProxyScheme;
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::settings::ReaderSettings;
 
 /// `gsettings list-recursively` output: `(schema, key)` to value, string quotes dropped.
 pub(crate) fn parse_gsettings(output: &str) -> BTreeMap<(String, String), String> {
@@ -104,13 +108,17 @@ pub(crate) fn gsettings_from(
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_gsettings(schema: &str, source: SettingsSource) -> Option<SystemSettings> {
-    let mut values = parse_gsettings(&run("gsettings", &["list-recursively", schema])?);
+fn read_gsettings(
+    schema: &str,
+    source: SettingsSource,
+    timeout: Duration,
+) -> Option<SystemSettings> {
+    let mut values = parse_gsettings(&run("gsettings", &["list-recursively", schema], timeout)?);
     // Some gsettings versions leave child schemas out of the recursive listing.
     for key in ["http", "https", "ftp", "socks"] {
         let child = alloc::format!("{schema}.{key}");
         if !values.keys().any(|(name, _)| *name == child)
-            && let Some(output) = run("gsettings", &["list-recursively", &child])
+            && let Some(output) = run("gsettings", &["list-recursively", &child], timeout)
         {
             values.extend(parse_gsettings(&output));
         }
@@ -247,8 +255,12 @@ pub(crate) fn network_manager_from(
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_network_manager() -> Option<SystemSettings> {
-    let uuids = run("nmcli", &["-g", "UUID", "connection", "show", "--active"])?;
+fn read_network_manager(timeout: Duration) -> Option<SystemSettings> {
+    let uuids = run(
+        "nmcli",
+        &["-g", "UUID", "connection", "show", "--active"],
+        timeout,
+    )?;
     for uuid in uuids.lines().map(str::trim).filter(|uuid| !uuid.is_empty()) {
         let Some(fields) = run(
             "nmcli",
@@ -259,6 +271,7 @@ fn read_network_manager() -> Option<SystemSettings> {
                 "show",
                 uuid,
             ],
+            timeout,
         ) else {
             continue;
         };
@@ -277,13 +290,14 @@ fn read_network_manager() -> Option<SystemSettings> {
 
 /// The first desktop with a proxy configured, else the first with settings.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn read() -> Option<SystemSettings> {
+pub(crate) fn read(reader: &ReaderSettings) -> Option<SystemSettings> {
+    let timeout = reader.command_timeout;
     let mut first: Option<SystemSettings> = None;
     let readers: [&dyn Fn() -> Option<SystemSettings>; 4] = [
-        &|| read_gsettings("org.gnome.system.proxy", SettingsSource::Gnome),
-        &|| read_gsettings("org.mate.system.proxy", SettingsSource::Mate),
+        &|| read_gsettings("org.gnome.system.proxy", SettingsSource::Gnome, timeout),
+        &|| read_gsettings("org.mate.system.proxy", SettingsSource::Mate, timeout),
         &read_kde,
-        &read_network_manager,
+        &|| read_network_manager(timeout),
     ];
     for reader in readers {
         let Some(settings) = reader() else { continue };

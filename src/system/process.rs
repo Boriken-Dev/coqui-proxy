@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::thread;
 
 /// The standard output of `program args`, or `None` when the program is missing, fails or runs
-/// longer than five seconds. No standard input, the C locale.
-pub(crate) fn run(program: &str, args: &[&str]) -> Option<String> {
+/// longer than `timeout`. No standard input, the C locale.
+pub(crate) fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .env("LC_ALL", "C")
@@ -26,7 +26,7 @@ pub(crate) fn run(program: &str, args: &[&str]) -> Option<String> {
         let _ = stdout.read_to_end(&mut output);
         let _ = sender.send(output);
     });
-    let output = match receiver.recv_timeout(Duration::from_secs(5)) {
+    let output = match receiver.recv_timeout(timeout) {
         Ok(output) => output,
         Err(_) => {
             tracing::debug!(program, "program timed out");

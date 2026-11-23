@@ -127,8 +127,12 @@ pub(crate) fn settings_from(settings: &BTreeMap<String, Value>) -> Option<System
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn read() -> Option<SystemSettings> {
-    settings_from(&parse_scutil(&super::process::run("scutil", &["--proxy"])?))
+pub(crate) fn read(reader: &crate::settings::ReaderSettings) -> Option<SystemSettings> {
+    settings_from(&parse_scutil(&super::process::run(
+        "scutil",
+        &["--proxy"],
+        reader.command_timeout,
+    )?))
 }
 
 #[cfg(test)]

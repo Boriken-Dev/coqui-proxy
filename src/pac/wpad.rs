@@ -2,9 +2,9 @@
 //! lease the system's DHCP client recorded), then `http://wpad.<domain>/wpad.dat` for each parent
 //! domain of this host's name, most specific first.
 
+use crate::settings::PacSettings;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::time::Duration;
 
 use super::PacScript;
 use super::dns::resolve;
@@ -68,18 +68,19 @@ pub(crate) fn host_fqdn() -> Option<String> {
 }
 
 /// A script that downloads from `url` and loads.
-fn load(url: &str, timeout: Duration) -> Option<PacScript> {
-    let body = fetch::get(url, timeout).ok()?;
+fn load(url: &str, settings: &PacSettings) -> Option<PacScript> {
+    let body = fetch::get(url, settings).ok()?;
     PacScript::builder(String::from_utf8_lossy(&body).into_owned())
+        .settings(settings)
         .build()
         .ok()
 }
 
 /// The first `wpad.dat` that downloads and loads, or `None`. A location whose script fails is
 /// skipped.
-pub(crate) fn discover(fqdn: Option<&str>, timeout: Duration) -> Option<PacScript> {
-    for url in super::dhcp::urls() {
-        if let Some(script) = load(&url, timeout) {
+pub(crate) fn discover(fqdn: Option<&str>, settings: &PacSettings) -> Option<PacScript> {
+    for url in super::dhcp::urls(&settings.reader) {
+        if let Some(script) = load(&url, settings) {
             return Some(script);
         }
     }
@@ -89,10 +90,10 @@ pub(crate) fn discover(fqdn: Option<&str>, timeout: Duration) -> Option<PacScrip
     };
     for domain in candidate_domains(&fqdn) {
         let host = alloc::format!("wpad.{domain}");
-        if resolve(&host, timeout).is_none() {
+        if resolve(&host, settings.wpad_probe_timeout).is_none() {
             continue;
         }
-        if let Some(script) = load(&alloc::format!("http://{host}/wpad.dat"), timeout) {
+        if let Some(script) = load(&alloc::format!("http://{host}/wpad.dat"), settings) {
             return Some(script);
         }
     }

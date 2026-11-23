@@ -79,6 +79,16 @@ impl OriginAuth {
             .any(|rule| pattern_matches(&rule.pattern, &host))
     }
 
+    /// What this policy allows that is looser than the defaults; empty when strict.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<String> {
+        let mut loose = Vec::new();
+        if self.plain_http {
+            loose.push("OriginAuth::plain_http(true): a login may cross plain http".to_string());
+        }
+        loose
+    }
+
     /// Whether a login over plain `http:` to a host that is not loopback is allowed.
     pub fn plain_http(&self) -> bool {
         self.plain_http

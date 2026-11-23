@@ -78,21 +78,19 @@ pub(crate) fn from_dhclient(contents: &str) -> Vec<String> {
 
 /// The WPAD URLs this machine's DHCP client recorded, the most recent first.
 #[cfg(unix)]
-pub(crate) fn urls() -> Vec<String> {
+pub(crate) fn urls(reader: &crate::settings::ReaderSettings) -> Vec<String> {
     use std::time::SystemTime;
 
     let mut urls = Vec::new();
-    if let Some(output) =
-        crate::system::process::run("nmcli", &["-t", "-f", "DHCP4,DHCP6", "device", "show"])
-    {
+    if let Some(output) = crate::system::process::run(
+        "nmcli",
+        &["-t", "-f", "DHCP4,DHCP6", "device", "show"],
+        reader.command_timeout,
+    ) {
         urls.extend(from_nmcli(&output));
     }
     let mut files: Vec<(SystemTime, String)> = Vec::new();
-    for directory in [
-        "/var/lib/dhcp",
-        "/var/lib/dhclient",
-        "/var/lib/NetworkManager",
-    ] {
+    for directory in &reader.dhcp_lease_paths {
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
@@ -122,7 +120,7 @@ pub(crate) fn urls() -> Vec<String> {
 
 /// Windows asks WinHTTP, which does its own DHCP discovery.
 #[cfg(not(unix))]
-pub(crate) fn urls() -> Vec<String> {
+pub(crate) fn urls(_reader: &crate::settings::ReaderSettings) -> Vec<String> {
     Vec::new()
 }
 
