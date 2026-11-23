@@ -256,6 +256,11 @@ pub(crate) fn network_manager_from(
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn read_network_manager(timeout: Duration) -> Option<SystemSettings> {
+    read_network_manager_nmcli(timeout).or_else(|| read_network_manager_dbus(timeout))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_network_manager_nmcli(timeout: Duration) -> Option<SystemSettings> {
     let uuids = run(
         "nmcli",
         &["-g", "UUID", "connection", "show", "--active"],
@@ -284,6 +289,138 @@ fn read_network_manager(timeout: Duration) -> Option<SystemSettings> {
         if let Some(settings) = network_manager_from(method.trim(), url, script) {
             return Some(settings);
         }
+    }
+    None
+}
+
+/// The object paths in a `dbus-send --print-reply` answer.
+#[cfg_attr(
+    all(not(unix), not(test)),
+    expect(dead_code, reason = "parsed by tests on every platform, used on Unix")
+)]
+pub(crate) fn dbus_object_paths(reply: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = reply;
+    while let Some(start) = rest.find("object path \"") {
+        rest = &rest[start + "object path \"".len()..];
+        let Some(end) = rest.find('"') else { break };
+        paths.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    paths
+}
+
+/// The string values of the `proxy` group of a `Settings.Connection.GetSettings` answer.
+/// `dbus-send --print-reply` is a debug printer, not a stable format: anything unexpected reads
+/// as no settings.
+#[cfg_attr(
+    all(not(unix), not(test)),
+    expect(dead_code, reason = "parsed by tests on every platform, used on Unix")
+)]
+pub(crate) fn dbus_proxy_group(reply: &str) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let Some(start) = reply.find("string \"proxy\"") else {
+        return values;
+    };
+    let Some(open) = reply[start..].find('[').map(|at| start + at) else {
+        return values;
+    };
+    let mut depth = 0usize;
+    let mut end = reply.len();
+    for (at, character) in reply[open..].char_indices() {
+        match character {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + at + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut rest = &reply[open..end];
+    while let Some(at) = rest.find("string \"") {
+        rest = &rest[at + "string \"".len()..];
+        let Some(quote) = rest.find('"') else { break };
+        let key = &rest[..quote];
+        let after = rest[quote + 1..].trim_start();
+        let Some(variant) = after.strip_prefix("variant") else {
+            rest = &rest[quote..];
+            continue;
+        };
+        let variant = variant.trim_start();
+        if key == "method"
+            && let Some(number) = variant.strip_prefix("int32 ")
+        {
+            // NetworkManager sends the method as an enum: 0 none, 1 auto.
+            let word = match number.split_whitespace().next() {
+                Some("1") => "auto",
+                Some("0") => "none",
+                _ => "",
+            };
+            values.insert(key.to_string(), word.to_string());
+            rest = &rest[quote..];
+            continue;
+        }
+        let Some(value) = variant.strip_prefix("string \"") else {
+            rest = &rest[quote..];
+            continue;
+        };
+        let Some(close) = value.find('"') else { break };
+        values.insert(key.to_string(), value[..close].to_string());
+        rest = &value[close..];
+    }
+    values
+}
+
+/// NetworkManager's proxy settings over D-Bus, for a machine without `nmcli`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_network_manager_dbus(timeout: Duration) -> Option<SystemSettings> {
+    const DESTINATION: &str = "org.freedesktop.NetworkManager";
+    let send = |args: &[&str]| {
+        let destination = alloc::format!("--dest={DESTINATION}");
+        let mut all = alloc::vec!["--system", "--print-reply", destination.as_str()];
+        all.extend_from_slice(args);
+        run("dbus-send", &all, timeout)
+    };
+    let active = send(&[
+        "/org/freedesktop/NetworkManager",
+        "org.freedesktop.DBus.Properties.Get",
+        &alloc::format!("string:{DESTINATION}"),
+        "string:ActiveConnections",
+    ])?;
+    let mut first = None;
+    for path in dbus_object_paths(&active) {
+        let Some(connection) = send(&[
+            &path,
+            "org.freedesktop.DBus.Properties.Get",
+            &alloc::format!("string:{DESTINATION}.Connection.Active"),
+            "string:Connection",
+        ]) else {
+            continue;
+        };
+        let Some(settings_path) = dbus_object_paths(&connection).into_iter().next() else {
+            continue;
+        };
+        let Some(reply) = send(&[
+            &settings_path,
+            &alloc::format!("{DESTINATION}.Settings.Connection.GetSettings"),
+        ]) else {
+            continue;
+        };
+        let group = dbus_proxy_group(&reply);
+        if group.is_empty() {
+            continue;
+        }
+        let field = |name: &str| group.get(name).map_or("", String::as_str);
+        if let Some(settings) =
+            network_manager_from(field("method"), field("pac-url"), field("pac-script"))
+        {
+            return Some(settings);
+        }
+        first.get_or_insert(());
     }
     None
 }
@@ -403,5 +540,67 @@ org.gnome.system.proxy.socks port 0
         assert!(!settings.auto_detect);
         let settings = network_manager_from("auto", "", "no function here").unwrap();
         assert!(settings.auto_detect);
+    }
+}
+
+#[cfg(test)]
+mod dbus_tests {
+    use super::*;
+
+    const REPLY: &str = r#"method return time=1 sender=:1.5 -> destination=:1.99 serial=3 reply_serial=2
+   array [
+      dict entry(
+         string "connection"
+         array [
+            dict entry(
+               string "id"
+               variant                   string "wired"
+            )
+         ]
+      )
+      dict entry(
+         string "proxy"
+         array [
+            dict entry(
+               string "method"
+               variant                   int32 1
+            )
+            dict entry(
+               string "pac-url"
+               variant                   string "http://wpad.corp.example/proxy.pac"
+            )
+            dict entry(
+               string "pac-script"
+               variant                   string ""
+            )
+         ]
+      )
+   ]"#;
+
+    #[test]
+    fn object_paths_are_read_from_a_reply() {
+        let reply = "   variant       array [\n         object path \"/org/freedesktop/NetworkManager/ActiveConnection/3\"\n         object path \"/org/freedesktop/NetworkManager/ActiveConnection/4\"\n      ]";
+        assert_eq!(
+            dbus_object_paths(reply),
+            [
+                "/org/freedesktop/NetworkManager/ActiveConnection/3",
+                "/org/freedesktop/NetworkManager/ActiveConnection/4"
+            ]
+        );
+        assert!(dbus_object_paths("nothing here").is_empty());
+    }
+
+    #[test]
+    fn only_the_string_values_of_the_proxy_group_are_read() {
+        let group = dbus_proxy_group(REPLY);
+        assert_eq!(
+            group.get("pac-url").map(String::as_str),
+            Some("http://wpad.corp.example/proxy.pac")
+        );
+        assert_eq!(group.get("pac-script").map(String::as_str), Some(""));
+        // `method` is an integer in the reply, and `id` belongs to another group.
+        assert_eq!(group.get("method").map(String::as_str), Some("auto"));
+        assert!(!group.contains_key("id"));
+        assert!(dbus_proxy_group("garbage [ string").is_empty());
     }
 }
