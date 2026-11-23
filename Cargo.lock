@@ -414,6 +414,7 @@ dependencies = [
  "http",
  "if-addrs",
  "libgssapi",
+ "libloading",
  "percent-encoding",
  "proptest",
  "rcgen",

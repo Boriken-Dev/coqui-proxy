@@ -11,6 +11,12 @@ use crate::bypass::BypassRules;
 use crate::proxy::{Proxy, ProxyScheme, Route, Target};
 pub use crate::settings::ReaderSettings;
 
+#[cfg(all(unix, feature = "libproxy"))]
+#[expect(
+    unsafe_code,
+    reason = "libproxy is a C library opened at run time; no maintained safe wrapper exists"
+)]
+mod libproxy;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
@@ -23,6 +29,8 @@ pub(crate) mod process;
     reason = "the WinHTTP calls have no safe binding; each block states its contract"
 )]
 pub mod winhttp;
+#[cfg(all(unix, feature = "libproxy"))]
+pub use libproxy::LibProxySource;
 #[cfg(windows)]
 pub use winhttp::WinHttpSource;
 #[cfg(any(windows, test))]

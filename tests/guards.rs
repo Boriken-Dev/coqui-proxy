@@ -57,11 +57,19 @@ fn unsafe_code_is_only_in_the_files_that_meet_a_system_boundary() {
             || line.contains("unsafe impl")
             || line.contains("unsafe extern")
     };
-    // src/auth/sspi.rs: SSPI with the logon session (no safe crate does that).
-    // src/system/winhttp.rs: WinHTTP proxy and PAC resolution.
+    // Each file is a system boundary no maintained safe crate covers (checked on crates.io):
+    // - src/auth/sspi.rs: SSPI with the logon session (`AcquireCredentialsHandleW` with no
+    //   explicit credentials, `InitializeSecurityContextW`); the `sspi` crate implements NTLM and
+    //   Kerberos itself and cannot use the session's ticket.
+    // - src/system/libproxy.rs: the libproxy C library, opened at run time (`libloading`).
+    // - src/system/winhttp.rs: `WinHttpGetProxyForUrl` and `WinHttpGetIEProxyConfigForCurrentUser`.
     assert_eq!(
         holding("src", uses_unsafe),
-        ["src/auth/sspi.rs", "src/system/winhttp.rs"]
+        [
+            "src/auth/sspi.rs",
+            "src/system/libproxy.rs",
+            "src/system/winhttp.rs"
+        ]
     );
 }
 
