@@ -11,6 +11,12 @@ use crate::bypass::BypassRules;
 use crate::proxy::{Proxy, ProxyScheme, Route, Target};
 pub use crate::settings::ReaderSettings;
 
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "CFNetwork and CoreFoundation are C APIs; no maintained safe crate runs a PAC script with a deadline"
+)]
+mod cfnetwork;
 #[cfg(all(unix, feature = "libproxy"))]
 #[expect(
     unsafe_code,
@@ -29,6 +35,8 @@ pub(crate) mod process;
     reason = "the WinHTTP calls have no safe binding; each block states its contract"
 )]
 pub mod winhttp;
+#[cfg(target_os = "macos")]
+pub use cfnetwork::CfNetworkSource;
 #[cfg(all(unix, feature = "libproxy"))]
 pub use libproxy::LibProxySource;
 #[cfg(windows)]

@@ -61,12 +61,14 @@ fn unsafe_code_is_only_in_the_files_that_meet_a_system_boundary() {
     // - src/auth/sspi.rs: SSPI with the logon session (`AcquireCredentialsHandleW` with no
     //   explicit credentials, `InitializeSecurityContextW`); the `sspi` crate implements NTLM and
     //   Kerberos itself and cannot use the session's ticket.
+    // - src/system/cfnetwork.rs: CFNetwork's proxy lookup and PAC run on a run-loop thread.
     // - src/system/libproxy.rs: the libproxy C library, opened at run time (`libloading`).
     // - src/system/winhttp.rs: `WinHttpGetProxyForUrl` and `WinHttpGetIEProxyConfigForCurrentUser`.
     assert_eq!(
         holding("src", uses_unsafe),
         [
             "src/auth/sspi.rs",
+            "src/system/cfnetwork.rs",
             "src/system/libproxy.rs",
             "src/system/winhttp.rs"
         ]
@@ -76,8 +78,8 @@ fn unsafe_code_is_only_in_the_files_that_meet_a_system_boundary() {
 #[test]
 fn the_library_keeps_no_process_wide_state() {
     let state = |line: &str| {
-        line.starts_with("static ")
-            || line.starts_with("pub static ")
+        // A foreign `static NAME: Type;` is a constant of a C library, not state of ours.
+        ((line.starts_with("static ") || line.starts_with("pub static ")) && line.contains('='))
             || line.contains("thread_local!")
             || line.contains("OnceLock")
             || line.contains("LazyLock")
