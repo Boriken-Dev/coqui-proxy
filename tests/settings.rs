@@ -50,6 +50,7 @@ fn the_defaults_are_the_documented_values() {
     assert_eq!(connector.user_agent, "coqui-proxy");
     assert_eq!(connector.max_response_head_bytes, 64 * 1024);
     assert_eq!(connector.max_response_headers, 100);
+    assert_eq!(connector.happy_eyeballs_delay, Duration::from_millis(250));
 }
 
 #[cfg(feature = "pac")]

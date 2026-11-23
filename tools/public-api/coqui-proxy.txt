@@ -187,12 +187,14 @@ pub fn coqui_proxy::pac::discover(core::option::Option<&str>, &coqui_proxy::sett
 pub type coqui_proxy::pac::CustomFunction = alloc::sync::Arc<(dyn core::ops::function::Fn(&[alloc::string::String]) -> core::result::Result<alloc::string::String, coqui_proxy::Error> + core::marker::Send + core::marker::Sync)>
 pub mod coqui_proxy::settings
 #[non_exhaustive] pub struct coqui_proxy::settings::ConnectorSettings
+pub coqui_proxy::settings::ConnectorSettings::happy_eyeballs_delay: core::time::Duration
 pub coqui_proxy::settings::ConnectorSettings::max_response_body_bytes: usize
 pub coqui_proxy::settings::ConnectorSettings::max_response_head_bytes: usize
 pub coqui_proxy::settings::ConnectorSettings::max_response_headers: usize
 pub coqui_proxy::settings::ConnectorSettings::timeout: core::time::Duration
 pub coqui_proxy::settings::ConnectorSettings::user_agent: alloc::string::String
 impl coqui_proxy::settings::ConnectorSettings
+pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_HAPPY_EYEBALLS_DELAY: core::time::Duration
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_BODY_BYTES: usize
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_HEADERS: usize
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_HEAD_BYTES: usize
@@ -456,12 +458,14 @@ pub fn coqui_proxy::ChildEnvironment::per_endpoint(&self) -> bool
 pub fn coqui_proxy::ChildEnvironment::socks_proxy(&self) -> core::option::Option<&coqui_proxy::Proxy>
 pub fn coqui_proxy::ChildEnvironment::unexpressed(&self) -> &[alloc::string::String]
 #[non_exhaustive] pub struct coqui_proxy::ConnectorSettings
+pub coqui_proxy::ConnectorSettings::happy_eyeballs_delay: core::time::Duration
 pub coqui_proxy::ConnectorSettings::max_response_body_bytes: usize
 pub coqui_proxy::ConnectorSettings::max_response_head_bytes: usize
 pub coqui_proxy::ConnectorSettings::max_response_headers: usize
 pub coqui_proxy::ConnectorSettings::timeout: core::time::Duration
 pub coqui_proxy::ConnectorSettings::user_agent: alloc::string::String
 impl coqui_proxy::settings::ConnectorSettings
+pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_HAPPY_EYEBALLS_DELAY: core::time::Duration
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_BODY_BYTES: usize
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_HEADERS: usize
 pub const coqui_proxy::settings::ConnectorSettings::DEFAULT_MAX_RESPONSE_HEAD_BYTES: usize

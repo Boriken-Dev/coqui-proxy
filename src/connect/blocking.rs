@@ -3,8 +3,11 @@
 
 use alloc::vec::Vec;
 use core::net::SocketAddr;
+use core::time::Duration;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
+use std::thread;
 
 use super::core::{
     BodyFraming, ConnectRequest, ConnectResponse, Outcome, Progress, ProxyLogin, decode_chunk_size,
@@ -144,22 +147,12 @@ impl ProxyConnector {
 
     fn connect_tcp(&self, host: &str, port: u16) -> Result<TcpStream, Error> {
         let timeout = self.settings.timeout;
-        let addresses: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
-        let mut last = None;
-        for address in addresses {
-            match TcpStream::connect_timeout(&address, timeout) {
-                Ok(stream) => {
-                    stream.set_read_timeout(Some(timeout))?;
-                    stream.set_write_timeout(Some(timeout))?;
-                    stream.set_nodelay(true)?;
-                    return Ok(stream);
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(Error::Io(last.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "no address")
-        })))
+        let addresses = interleaved((host, port).to_socket_addrs()?.collect());
+        let stream = race(addresses, timeout, self.settings.happy_eyeballs_delay)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
     }
 
     fn tunnel(&self, proxy: &Proxy, host: &str, port: u16) -> Result<Connection, Error> {
@@ -216,6 +209,64 @@ impl ProxyConnector {
             }
         }
     }
+}
+
+/// The addresses with the families alternating, the first family first (RFC 8305).
+fn interleaved(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let Some(first) = addresses.first().map(SocketAddr::is_ipv6) else {
+        return addresses;
+    };
+    let (mut same, mut other): (Vec<_>, Vec<_>) = addresses
+        .into_iter()
+        .partition(|address| address.is_ipv6() == first);
+    same.reverse();
+    other.reverse();
+    let mut ordered = Vec::new();
+    while !same.is_empty() || !other.is_empty() {
+        ordered.extend(same.pop());
+        ordered.extend(other.pop());
+    }
+    ordered
+}
+
+/// Connects to the first address that answers: each attempt starts when the one before it failed
+/// or has run for `delay`, and the first success wins; slower attempts finish on their own.
+fn race(
+    addresses: Vec<SocketAddr>,
+    timeout: Duration,
+    delay: Duration,
+) -> Result<TcpStream, Error> {
+    let (sender, receiver) = mpsc::channel();
+    let total = addresses.len();
+    let mut last = None;
+    let mut finished = 0;
+    for address in addresses {
+        let sender = sender.clone();
+        drop(thread::spawn(move || {
+            let _ = sender.send(TcpStream::connect_timeout(&address, timeout));
+        }));
+        match receiver.recv_timeout(delay) {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => {
+                finished += 1;
+                last = Some(error);
+            }
+            Err(_) => {}
+        }
+    }
+    while finished < total {
+        match receiver.recv() {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => {
+                finished += 1;
+                last = Some(error);
+            }
+            Err(_) => break,
+        }
+    }
+    Err(Error::Io(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "no address")
+    })))
 }
 
 /// Reads a reply head one byte at a time, so nothing of the tunnel behind it is consumed.
@@ -419,5 +470,66 @@ mod tests {
         let mut stream = Canned::new(&[0, 0x5b, 0, 0, 0, 0, 0, 0]);
         let error = connect(&mut stream, ProxyScheme::Socks4, None, "h", 80).unwrap_err();
         assert!(matches!(error, Error::Refused(_)), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod race_tests {
+    use alloc::string::{String, ToString};
+
+    use super::*;
+
+    fn address(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn the_families_alternate_starting_with_the_first() {
+        let ordered = interleaved(alloc::vec![
+            address("[::1]:1"),
+            address("[::2]:1"),
+            address("127.0.0.1:1"),
+            address("127.0.0.2:1"),
+            address("[::3]:1"),
+        ]);
+        let texts: Vec<String> = ordered.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            texts,
+            [
+                "[::1]:1",
+                "127.0.0.1:1",
+                "[::2]:1",
+                "127.0.0.2:1",
+                "[::3]:1"
+            ]
+        );
+        assert!(interleaved(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_refused_address_gives_way_to_the_next_at_once() {
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let live = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let started = std::time::Instant::now();
+        let stream = race(
+            alloc::vec![dead, live.local_addr().unwrap()],
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), live.local_addr().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            race(
+                alloc::vec![dead],
+                Duration::from_secs(5),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(race(Vec::new(), Duration::from_secs(1), Duration::from_secs(1)).is_err());
     }
 }

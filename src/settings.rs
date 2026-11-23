@@ -25,6 +25,9 @@ pub struct ConnectorSettings {
     pub max_response_headers: usize,
     /// The longest reply body drained between the legs of a login (64 KiB).
     pub max_response_body_bytes: usize,
+    /// How long a connection attempt may run before the next address is tried alongside it, as
+    /// in RFC 8305 (250 ms).
+    pub happy_eyeballs_delay: Duration,
 }
 
 impl ConnectorSettings {
@@ -38,6 +41,8 @@ impl ConnectorSettings {
     pub const DEFAULT_MAX_RESPONSE_HEADERS: usize = 100;
     /// The default longest drained reply body.
     pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
+    /// The default delay before the next address is tried.
+    pub const DEFAULT_HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 }
 
 impl Default for ConnectorSettings {
@@ -48,6 +53,7 @@ impl Default for ConnectorSettings {
             max_response_head_bytes: Self::DEFAULT_MAX_RESPONSE_HEAD_BYTES,
             max_response_headers: Self::DEFAULT_MAX_RESPONSE_HEADERS,
             max_response_body_bytes: Self::DEFAULT_MAX_RESPONSE_BODY_BYTES,
+            happy_eyeballs_delay: Self::DEFAULT_HAPPY_EYEBALLS_DELAY,
         }
     }
 }
