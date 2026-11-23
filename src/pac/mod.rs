@@ -8,7 +8,6 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::net::IpAddr;
 use core::time::Duration;
 use std::collections::HashMap;
@@ -43,11 +42,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 const LOOP_LIMIT: u64 = 20_000_000;
 const RECURSION_LIMIT: usize = 400;
 
-thread_local! {
-    // One script owns its thread, so its DNS cache is per thread.
-    static DNS_CACHE: RefCell<HashMap<String, (Instant, Option<String>)>> = RefCell::new(HashMap::new());
-}
-
 fn pac_error(text: impl Into<String>) -> Error {
     Error::Pac(Reason::new(text))
 }
@@ -62,6 +56,15 @@ struct Worker {
     requests: Sender<Request>,
 }
 
+/// What the builtins of one script share: its name-lookup cache, kept across restarts of its worker.
+struct Shared {
+    dns: Mutex<HashMap<String, (Instant, Option<String>)>>,
+}
+
+/// The script state a builtin reaches; it holds nothing the collector owns.
+#[derive(Clone, boa_gc::Trace, boa_gc::Finalize)]
+struct Captured(#[unsafe_ignore_trace] Arc<Shared>);
+
 struct State {
     worker: Option<Worker>,
     failed_at: Option<Instant>,
@@ -73,6 +76,7 @@ struct State {
 /// refused for 30 seconds, then started afresh.
 pub struct PacScript {
     source: Arc<str>,
+    shared: Arc<Shared>,
     timeout: Duration,
     clock: Option<i64>,
     state: Mutex<State>,
@@ -120,6 +124,9 @@ impl PacScriptBuilder {
     pub fn build(self) -> Result<PacScript, Error> {
         let script = PacScript {
             source: self.source.into(),
+            shared: Arc::new(Shared {
+                dns: Mutex::new(HashMap::new()),
+            }),
             timeout: self.timeout,
             clock: self.clock,
             state: Mutex::new(State {
@@ -191,10 +198,11 @@ impl PacScript {
         let (ready_sender, ready) = mpsc::channel::<Result<(), String>>();
         let source = Arc::clone(&self.source);
         let clock = self.clock;
+        let shared = Arc::clone(&self.shared);
         thread::Builder::new()
             .name("coqui-proxy-pac".into())
             .stack_size(16 << 20)
-            .spawn(move || run_worker(&source, clock, &ready_sender, &incoming))?;
+            .spawn(move || run_worker(&source, clock, &shared, &ready_sender, &incoming))?;
         match ready.recv_timeout(self.timeout) {
             Ok(Ok(())) => Ok(Worker { requests }),
             Ok(Err(message)) => Err(pac_error(message)),
@@ -261,10 +269,11 @@ impl PacScript {
 fn run_worker(
     source: &str,
     clock: Option<i64>,
+    shared: &Arc<Shared>,
     ready: &Sender<Result<(), String>>,
     incoming: &Receiver<Request>,
 ) {
-    let mut context = match load(source, clock) {
+    let mut context = match load(source, clock, shared) {
         Ok(context) => context,
         Err(message) => {
             let _ = ready.send(Err(message));
@@ -287,12 +296,12 @@ fn describe(error: &boa_engine::JsError, context: &mut Context) -> String {
     text.chars().take(200).collect()
 }
 
-fn load(source: &str, clock: Option<i64>) -> Result<Context, String> {
+fn load(source: &str, clock: Option<i64>, shared: &Arc<Shared>) -> Result<Context, String> {
     let mut context = Context::default();
     let limits = context.runtime_limits_mut();
     limits.set_loop_iteration_limit(LOOP_LIMIT);
     limits.set_recursion_limit(RECURSION_LIMIT);
-    register(&mut context).map_err(|error| describe(&error, &mut context))?;
+    register(&mut context, shared).map_err(|error| describe(&error, &mut context))?;
     context
         .eval(Source::from_bytes(PRELUDE))
         .map_err(|error| describe(&error, &mut context))?;
@@ -346,87 +355,88 @@ fn string(value: &str) -> JsValue {
     JsValue::from(boa_engine::JsString::from(value))
 }
 
-fn dns_resolve(host: &str) -> Option<String> {
-    DNS_CACHE.with(|cache| {
-        if let Some((at, answer)) = cache.borrow().get(host)
-            && at.elapsed() < DNS_TTL
-        {
-            return answer.clone();
-        }
-        let answer = resolve(host, DNS_TIMEOUT).map(|address| address.to_string());
-        cache
-            .borrow_mut()
-            .insert(host.to_string(), (Instant::now(), answer.clone()));
-        answer
-    })
+fn dns_resolve(shared: &Shared, host: &str) -> Option<String> {
+    let mut cache = shared
+        .dns
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, answer)) = cache.get(host)
+        && at.elapsed() < DNS_TTL
+    {
+        return answer.clone();
+    }
+    let answer = resolve(host, DNS_TIMEOUT).map(|address| address.to_string());
+    cache.insert(host.to_string(), (Instant::now(), answer.clone()));
+    answer
 }
 
-fn resolve_to_address(host: &str) -> Option<IpAddr> {
+fn resolve_to_address(shared: &Shared, host: &str) -> Option<IpAddr> {
     host.parse()
         .ok()
-        .or_else(|| dns_resolve(host)?.parse().ok())
+        .or_else(|| dns_resolve(shared, host)?.parse().ok())
 }
 
 fn local_name() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
-fn register(context: &mut Context) -> JsResult<()> {
-    type Native = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
+fn register(context: &mut Context, shared: &Arc<Shared>) -> JsResult<()> {
+    type Native = fn(&Shared, &JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
     let natives: [(boa_engine::JsString, usize, Native); 16] = [
-        (js_string!("dnsResolve"), 1, |_, a, c| {
-            Ok(dns_resolve(&text(a, 0, c)?).map_or_else(JsValue::null, |address| string(&address)))
+        (js_string!("dnsResolve"), 1, |s, _, a, c| {
+            Ok(dns_resolve(s, &text(a, 0, c)?)
+                .map_or_else(JsValue::null, |address| string(&address)))
         }),
-        (js_string!("dnsResolveEx"), 1, |_, a, c| {
+        (js_string!("dnsResolveEx"), 1, |_s, _, a, c| {
             let list: Vec<String> = resolve_all(&text(a, 0, c)?, DNS_TIMEOUT)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
             Ok(string(&list.join("; ")))
         }),
-        (js_string!("myIpAddress"), 0, |_, _, _| {
+        (js_string!("myIpAddress"), 0, |_s, _, _, _| {
             Ok(string(&resolve(&local_name(), DNS_TIMEOUT).map_or_else(
                 || "127.0.0.1".to_string(),
                 |a| a.to_string(),
             )))
         }),
-        (js_string!("myIpAddressEx"), 0, |_, _, _| {
+        (js_string!("myIpAddressEx"), 0, |_s, _, _, _| {
             let list: Vec<String> = resolve_all(&local_name(), DNS_TIMEOUT)
                 .iter()
                 .map(ToString::to_string)
                 .collect();
             Ok(string(&list.join("; ")))
         }),
-        (js_string!("isResolvable"), 1, |_, a, c| {
+        (js_string!("isResolvable"), 1, |_s, _, a, c| {
             Ok(JsValue::from(
                 resolve(&text(a, 0, c)?, DNS_TIMEOUT).is_some(),
             ))
         }),
-        (js_string!("isResolvableEx"), 1, |_, a, c| {
+        (js_string!("isResolvableEx"), 1, |_s, _, a, c| {
             Ok(JsValue::from(
                 !resolve_all(&text(a, 0, c)?, DNS_TIMEOUT).is_empty(),
             ))
         }),
-        (js_string!("isInNet"), 3, |_, a, c| {
+        (js_string!("isInNet"), 3, |_s, _, a, c| {
             let host = text(a, 0, c)?;
             let (pattern, mask) = (text(a, 1, c)?, text(a, 2, c)?);
-            Ok(JsValue::from(resolve_to_address(&host).is_some_and(
+            Ok(JsValue::from(resolve_to_address(_s, &host).is_some_and(
                 |address| builtins::is_in_net(address, &pattern, &mask),
             )))
         }),
-        (js_string!("isInNetEx"), 2, |_, a, c| {
+        (js_string!("isInNetEx"), 2, |_s, _, a, c| {
             Ok(JsValue::from(builtins::is_in_net_ex(
                 &text(a, 0, c)?,
                 &text(a, 1, c)?,
             )))
         }),
-        (js_string!("sortIpAddressList"), 1, |_, a, c| {
+        (js_string!("sortIpAddressList"), 1, |_s, _, a, c| {
             Ok(string(&builtins::sort_ip_address_list(&text(a, 0, c)?)))
         }),
-        (js_string!("getClientVersion"), 0, |_, _, _| {
+        (js_string!("getClientVersion"), 0, |_s, _, _, _| {
             Ok(string(&builtins::client_version()))
         }),
-        (js_string!("shExpMatch"), 2, |_, a, c| {
+        (js_string!("shExpMatch"), 2, |_s, _, a, c| {
             // Only `*` and `?` are wildcards, and the match is case-sensitive, as in browsers.
             Ok(JsValue::from(wildcard_match(
                 &text(a, 1, c)?,
@@ -434,32 +444,38 @@ fn register(context: &mut Context) -> JsResult<()> {
                 false,
             )))
         }),
-        (js_string!("isPlainHostName"), 1, |_, a, c| {
+        (js_string!("isPlainHostName"), 1, |_s, _, a, c| {
             Ok(JsValue::from(!text(a, 0, c)?.contains('.')))
         }),
-        (js_string!("dnsDomainIs"), 2, |_, a, c| {
+        (js_string!("dnsDomainIs"), 2, |_s, _, a, c| {
             Ok(JsValue::from(text(a, 0, c)?.ends_with(&text(a, 1, c)?)))
         }),
-        (js_string!("localHostOrDomainIs"), 2, |_, a, c| {
+        (js_string!("localHostOrDomainIs"), 2, |_s, _, a, c| {
             Ok(JsValue::from(builtins::local_host_or_domain_is(
                 &text(a, 0, c)?,
                 &text(a, 1, c)?,
             )))
         }),
-        (js_string!("dnsDomainLevels"), 1, |_, a, c| {
+        (js_string!("dnsDomainLevels"), 1, |_s, _, a, c| {
             Ok(JsValue::from(
                 i32::try_from(builtins::dns_domain_levels(&text(a, 0, c)?)).unwrap_or(i32::MAX),
             ))
         }),
-        (js_string!("convert_addr"), 1, |_, a, c| {
+        (js_string!("convert_addr"), 1, |_s, _, a, c| {
             Ok(builtins::convert_addr(&text(a, 0, c)?).map_or_else(JsValue::nan, JsValue::from))
         }),
     ];
     for (name, length, function) in natives {
+        let captures = Captured(Arc::clone(shared));
         context.register_global_builtin_callable(
             name,
             length,
-            NativeFunction::from_fn_ptr(function),
+            NativeFunction::from_copy_closure_with_captures(
+                move |this, arguments, captured: &Captured, context| {
+                    function(&captured.0, this, arguments, context)
+                },
+                captures,
+            ),
         )?;
     }
     Ok(())

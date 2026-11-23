@@ -76,7 +76,7 @@ fn the_library_keeps_no_process_wide_state() {
             || line.contains("LazyCell")
             || line.contains("lazy_static")
     };
-    assert_eq!(holding("src", state), ["src/pac/mod.rs"]);
+    assert_eq!(holding("src", state), Vec::<String>::new());
 }
 
 #[test]
