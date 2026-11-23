@@ -25,6 +25,10 @@ default = []
 pac = ["dep:boa_engine", "dep:boa_gc", "dep:gethostname"]
 # `https:` proxies and PAC locations: a rustls client configuration, by default verified by the operating system.
 tls = ["dep:rustls", "dep:rustls-platform-verifier"]
+# The asynchronous connector (`asynch`), driven by Tokio; with `tls` it also speaks to an `https:` proxy.
+tokio = ["dep:tokio", "dep:tokio-rustls"]
+# `hyper::Connector`: the asynchronous connector as a `tower` service for hyper's client.
+hyper = ["tokio", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
 # Negotiate and NTLM proxy and server login: SSPI on Windows, GSSAPI elsewhere (needs the system's GSSAPI library
 # and, to build, libclang).
 negotiate = ["dep:libgssapi"]
@@ -58,6 +62,15 @@ gethostname = { version = "1", optional = true }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-platform-verifier = { version = "0.7", optional = true }
 
+# The asynchronous connector (feature `tokio`): sockets, timers and `spawn_blocking` for the resolver.
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "time", "rt"], optional = true }
+# TLS to an `https:` proxy over a Tokio socket (feature `tokio`, used with `tls`).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+# hyper's connector trait surface (feature `hyper`).
+hyper = { version = "1", default-features = false, optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "client-legacy"], optional = true }
+tower-service = { version = "0.3", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -79,3 +92,7 @@ rcgen = "0.14"
 tempfile = "3"
 # Arbitrary bytes into every decoder.
 proptest = "1"
+# The asynchronous connector's tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+# The hyper connector's tests call it as a service.
+tower-service = "0.3"

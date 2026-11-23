@@ -17,6 +17,9 @@ pub mod connect;
 mod dns;
 mod env;
 mod error;
+#[cfg(feature = "hyper")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
+pub mod hyper;
 mod netutil;
 #[cfg(feature = "pac")]
 pub mod pac;
@@ -30,6 +33,9 @@ mod tls;
 
 pub use auth::{Negotiate, NegotiateBuilder, OriginAuth, OriginAuthBuilder, OriginLogin};
 pub use bypass::{BypassRules, Dialect};
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use connect::asynch;
 pub use connect::{Connection, ProxyConnector, ProxyConnectorBuilder};
 pub use env::{EnvSource, EnvSourceBuilder, Environment, ProxyVariables};
 pub use error::{Error, Reason, UnsupportedProxy};

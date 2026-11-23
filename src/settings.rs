@@ -28,6 +28,11 @@ pub struct ConnectorSettings {
     /// How long a connection attempt may run before the next address is tried alongside it, as
     /// in RFC 8305 (250 ms).
     pub happy_eyeballs_delay: Duration,
+    /// Try the next route of an answer when connecting through one fails (true). Off, only the
+    /// first route is tried and its error is the result.
+    pub failover: bool,
+    /// How long a proxy that failed to connect is tried after the others by this connector (300 s).
+    pub bad_proxy_ttl: Duration,
 }
 
 impl ConnectorSettings {
@@ -43,6 +48,10 @@ impl ConnectorSettings {
     pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
     /// The default delay before the next address is tried.
     pub const DEFAULT_HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
+    /// The default failover.
+    pub const DEFAULT_FAILOVER: bool = true;
+    /// The default time a failed proxy is tried last.
+    pub const DEFAULT_BAD_PROXY_TTL: Duration = Duration::from_secs(300);
 }
 
 impl Default for ConnectorSettings {
@@ -54,6 +63,8 @@ impl Default for ConnectorSettings {
             max_response_headers: Self::DEFAULT_MAX_RESPONSE_HEADERS,
             max_response_body_bytes: Self::DEFAULT_MAX_RESPONSE_BODY_BYTES,
             happy_eyeballs_delay: Self::DEFAULT_HAPPY_EYEBALLS_DELAY,
+            failover: Self::DEFAULT_FAILOVER,
+            bad_proxy_ttl: Self::DEFAULT_BAD_PROXY_TTL,
         }
     }
 }
