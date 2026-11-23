@@ -101,6 +101,15 @@ mod pac {
     }
 
     #[test]
+    fn clear_forgets_answers_and_what_was_loaded_from_the_settings() {
+        let resolver = counting_resolver(ResolverSettings::default());
+        assert_eq!(first_host(&resolver, "http://a.example/"), "h1");
+        assert_eq!(first_host(&resolver, "http://b.example/"), "h2");
+        resolver.clear();
+        assert_eq!(first_host(&resolver, "http://c.example/"), "h1");
+    }
+
+    #[test]
     fn the_cache_keeps_cache_capacity_answers_and_drops_the_oldest() {
         let mut settings = ResolverSettings::default();
         settings.cache_capacity = 1;

@@ -708,14 +708,41 @@ impl SystemSource {
     }
 
     fn clear(&self) {
-        *self
+        let mut cached = self
             .cached
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Settings read a moment ago are kept (`gsettings_cache_ttl`); what was loaded from them is not.
+        match cached.as_mut() {
+            Some(current) if current.at.elapsed() < self.settings.reader.gsettings_cache_ttl => {
+                current.slots = Arc::new(self.slots_for(&current.settings));
+            }
+            _ => *cached = None,
+        }
+        drop(cached);
         self.answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+    }
+
+    /// The PAC sources the settings name, fresh: nothing loaded yet.
+    fn slots_for(&self, settings: &SystemSettings) -> Vec<Slot> {
+        let mut slots = Vec::new();
+        if settings.state != SettingsState::Direct {
+            if settings.auto_detect
+                || (self.settings.wpad && settings.state == SettingsState::Unset)
+            {
+                slots.push(Slot::pac(PacSource::Wpad));
+            }
+            if let Some(url) = &settings.pac_url {
+                slots.push(Slot::pac(PacSource::Location(url.clone())));
+            }
+            if let Some(script) = &settings.pac_script {
+                slots.push(Slot::pac(PacSource::Text(script.clone())));
+            }
+        }
+        slots
     }
 
     /// The settings and the PAC slots built from them, read again after `settings_refresh`.
@@ -739,21 +766,7 @@ impl SystemSource {
             .with_dns_timeout(self.settings.bypass_dns_timeout)
             .with_interface_cache_ttl(self.settings.interface_cache_ttl);
         let settings = Arc::new(read);
-        let mut slots = Vec::new();
-        if settings.state != SettingsState::Direct {
-            if settings.auto_detect
-                || (self.settings.wpad && settings.state == SettingsState::Unset)
-            {
-                slots.push(Slot::pac(PacSource::Wpad));
-            }
-            if let Some(url) = &settings.pac_url {
-                slots.push(Slot::pac(PacSource::Location(url.clone())));
-            }
-            if let Some(script) = &settings.pac_script {
-                slots.push(Slot::pac(PacSource::Text(script.clone())));
-            }
-        }
-        let slots = Arc::new(slots);
+        let slots = Arc::new(self.slots_for(&settings));
         *cached = Some(Cached {
             at: Instant::now(),
             settings: Arc::clone(&settings),

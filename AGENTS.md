@@ -233,7 +233,7 @@ Every bound is a field with a `DEFAULT_*` constant; each type has `Default` and 
 | `::download_timeout`, `::max_redirects`, `::download_cache_ttl` | 10 s, 3, 300 s |
 | `::dns_timeout`, `::dns_cache_ttl`, `::dns_cache_capacity` | 2 s, 30 s, 256 |
 | `::wpad_probe_timeout`, `::browser_compatibility`, `::tls` | 3 s, false, system verifier |
-| `ConnectorSettings::timeout`, `::user_agent` | 30 s, `coqui-proxy` |
+| `ConnectorSettings::timeout`, `::user_agent`, `::happy_eyeballs_delay` | 30 s, `coqui-proxy`, 250 ms |
 | `::max_response_head_bytes`, `::max_response_headers`, `::max_response_body_bytes` | 64 KiB, 100, 64 KiB |
 | `Negotiate::max_legs`, `::max_token` | 5, 64 KiB |
 | `OriginAuth::max_body` | 1 MiB |
