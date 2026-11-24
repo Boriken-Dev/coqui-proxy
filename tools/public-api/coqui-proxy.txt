@@ -260,19 +260,53 @@ pub fn coqui_proxy::pac::builtin_names() -> &'static [&'static str]
 pub fn coqui_proxy::pac::discover(core::option::Option<&str>, &coqui_proxy::settings::PacSettings) -> core::result::Result<core::option::Option<coqui_proxy::pac::PacScript>, coqui_proxy::Error>
 pub type coqui_proxy::pac::CustomFunction = alloc::sync::Arc<(dyn core::ops::function::Fn(&[alloc::string::String]) -> core::result::Result<alloc::string::String, coqui_proxy::Error> + core::marker::Send + core::marker::Sync)>
 pub mod coqui_proxy::relay
+pub mod coqui_proxy::relay::blocking
+pub struct coqui_proxy::relay::blocking::Relay
+impl coqui_proxy::relay::blocking::Relay
+pub fn coqui_proxy::relay::blocking::Relay::builder(coqui_proxy::connect::ProxyConnector, coqui_proxy::Resolver) -> coqui_proxy::relay::blocking::RelayBuilder
+pub fn coqui_proxy::relay::blocking::Relay::not_applied(&self) -> alloc::vec::Vec<&'static str>
+pub fn coqui_proxy::relay::blocking::Relay::settings(&self) -> &coqui_proxy::settings::RelaySettings
+pub fn coqui_proxy::relay::blocking::Relay::start(self) -> core::result::Result<coqui_proxy::relay::blocking::RelayHandle, coqui_proxy::Error>
+impl core::fmt::Debug for coqui_proxy::relay::blocking::Relay
+pub fn coqui_proxy::relay::blocking::Relay::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_proxy::relay::blocking::RelayBuilder
+impl coqui_proxy::relay::blocking::RelayBuilder
+pub fn coqui_proxy::relay::blocking::RelayBuilder::build(self) -> core::result::Result<coqui_proxy::relay::blocking::Relay, coqui_proxy::Error>
+pub fn coqui_proxy::relay::blocking::RelayBuilder::non_defaults(&self) -> alloc::vec::Vec<alloc::string::String>
+pub fn coqui_proxy::relay::blocking::RelayBuilder::not_applied(&self) -> alloc::vec::Vec<&'static str>
+pub fn coqui_proxy::relay::blocking::RelayBuilder::settings(self, coqui_proxy::settings::RelaySettings) -> Self
+pub fn coqui_proxy::relay::blocking::RelayBuilder::start(self) -> core::result::Result<coqui_proxy::relay::blocking::RelayHandle, coqui_proxy::Error>
+impl core::fmt::Debug for coqui_proxy::relay::blocking::RelayBuilder
+pub fn coqui_proxy::relay::blocking::RelayBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_proxy::relay::blocking::RelayHandle
+impl coqui_proxy::relay::blocking::RelayHandle
+pub fn coqui_proxy::relay::blocking::RelayHandle::address(&self) -> core::net::socket_addr::SocketAddr
+pub fn coqui_proxy::relay::blocking::RelayHandle::credentials(&self) -> &coqui_proxy::Credentials
+pub fn coqui_proxy::relay::blocking::RelayHandle::proxy(&self) -> &coqui_proxy::Proxy
+pub fn coqui_proxy::relay::blocking::RelayHandle::proxy_url(&self) -> alloc::string::String
+pub fn coqui_proxy::relay::blocking::RelayHandle::shutdown(self)
+pub fn coqui_proxy::relay::blocking::RelayHandle::token_header(&self) -> (&'static str, &str)
+impl core::fmt::Debug for coqui_proxy::relay::blocking::RelayHandle
+pub fn coqui_proxy::relay::blocking::RelayHandle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for coqui_proxy::relay::blocking::RelayHandle
+pub fn coqui_proxy::relay::blocking::RelayHandle::drop(&mut self)
 pub struct coqui_proxy::relay::Relay
 impl coqui_proxy::relay::Relay
 pub fn coqui_proxy::relay::Relay::builder(coqui_proxy::connect::asynch::ProxyConnector, coqui_proxy::Resolver) -> coqui_proxy::relay::RelayBuilder
+pub fn coqui_proxy::relay::Relay::not_applied(&self) -> alloc::vec::Vec<&'static str>
 pub fn coqui_proxy::relay::Relay::settings(&self) -> &coqui_proxy::settings::RelaySettings
 pub fn coqui_proxy::relay::Relay::start(self) -> core::result::Result<coqui_proxy::relay::RelayHandle, coqui_proxy::Error>
+pub fn coqui_proxy::relay::Relay::start_on(self, &tokio::runtime::handle::Handle) -> core::result::Result<coqui_proxy::relay::RelayHandle, coqui_proxy::Error>
 impl core::fmt::Debug for coqui_proxy::relay::Relay
 pub fn coqui_proxy::relay::Relay::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct coqui_proxy::relay::RelayBuilder
 impl coqui_proxy::relay::RelayBuilder
 pub fn coqui_proxy::relay::RelayBuilder::build(self) -> core::result::Result<coqui_proxy::relay::Relay, coqui_proxy::Error>
 pub fn coqui_proxy::relay::RelayBuilder::non_defaults(&self) -> alloc::vec::Vec<alloc::string::String>
+pub fn coqui_proxy::relay::RelayBuilder::not_applied(&self) -> alloc::vec::Vec<&'static str>
 pub fn coqui_proxy::relay::RelayBuilder::settings(self, coqui_proxy::settings::RelaySettings) -> Self
 pub fn coqui_proxy::relay::RelayBuilder::start(self) -> core::result::Result<coqui_proxy::relay::RelayHandle, coqui_proxy::Error>
+pub fn coqui_proxy::relay::RelayBuilder::start_on(self, &tokio::runtime::handle::Handle) -> core::result::Result<coqui_proxy::relay::RelayHandle, coqui_proxy::Error>
 impl core::fmt::Debug for coqui_proxy::relay::RelayBuilder
 pub fn coqui_proxy::relay::RelayBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct coqui_proxy::relay::RelayHandle
@@ -363,7 +397,9 @@ pub coqui_proxy::settings::RelaySettings::header_timeout: core::time::Duration
 pub coqui_proxy::settings::RelaySettings::idle_timeout: core::time::Duration
 pub coqui_proxy::settings::RelaySettings::max_connections: usize
 pub coqui_proxy::settings::RelaySettings::max_head_bytes: usize
+pub coqui_proxy::settings::RelaySettings::poll_interval: core::time::Duration
 pub coqui_proxy::settings::RelaySettings::port: u16
+pub coqui_proxy::settings::RelaySettings::shutdown_wait: core::time::Duration
 impl coqui_proxy::settings::RelaySettings
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_ACCEPT_RETRY: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_ADDRESS: core::net::ip_addr::IpAddr
@@ -371,7 +407,9 @@ pub const coqui_proxy::settings::RelaySettings::DEFAULT_HEADER_TIMEOUT: core::ti
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_IDLE_TIMEOUT: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_MAX_CONNECTIONS: usize
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_MAX_HEAD_BYTES: usize
+pub const coqui_proxy::settings::RelaySettings::DEFAULT_POLL_INTERVAL: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_PORT: u16
+pub const coqui_proxy::settings::RelaySettings::DEFAULT_SHUTDOWN_WAIT: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::MIN_MAX_HEAD_BYTES: usize
 impl coqui_proxy::settings::RelaySettings
 pub fn coqui_proxy::settings::RelaySettings::non_defaults(&self) -> alloc::vec::Vec<alloc::string::String>
@@ -786,7 +824,9 @@ pub coqui_proxy::RelaySettings::header_timeout: core::time::Duration
 pub coqui_proxy::RelaySettings::idle_timeout: core::time::Duration
 pub coqui_proxy::RelaySettings::max_connections: usize
 pub coqui_proxy::RelaySettings::max_head_bytes: usize
+pub coqui_proxy::RelaySettings::poll_interval: core::time::Duration
 pub coqui_proxy::RelaySettings::port: u16
+pub coqui_proxy::RelaySettings::shutdown_wait: core::time::Duration
 impl coqui_proxy::settings::RelaySettings
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_ACCEPT_RETRY: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_ADDRESS: core::net::ip_addr::IpAddr
@@ -794,7 +834,9 @@ pub const coqui_proxy::settings::RelaySettings::DEFAULT_HEADER_TIMEOUT: core::ti
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_IDLE_TIMEOUT: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_MAX_CONNECTIONS: usize
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_MAX_HEAD_BYTES: usize
+pub const coqui_proxy::settings::RelaySettings::DEFAULT_POLL_INTERVAL: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::DEFAULT_PORT: u16
+pub const coqui_proxy::settings::RelaySettings::DEFAULT_SHUTDOWN_WAIT: core::time::Duration
 pub const coqui_proxy::settings::RelaySettings::MIN_MAX_HEAD_BYTES: usize
 impl coqui_proxy::settings::RelaySettings
 pub fn coqui_proxy::settings::RelaySettings::non_defaults(&self) -> alloc::vec::Vec<alloc::string::String>

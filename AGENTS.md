@@ -16,7 +16,8 @@ MSRV Rust 1.89, edition 2024. A default build depends on `http`, `percent-encodi
 | `libproxy` | Unix: `libloading` | `system::LibProxySource` |
 | `tokio` | `tokio`, `tokio-rustls` | `asynch::*`: the connector on Tokio (an `https:` proxy also needs `tls`) |
 | `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service` | `hyper::Connector` |
-| `relay` | `hyper` (server, client, HTTP/1), `http-body-util`, `bytes`, `getrandom`, `subtle` | `relay::*`: an in-process loopback proxy |
+| `relay` | `hyper` (server, client, HTTP/1), `http-body-util`, `bytes`, `getrandom`, `subtle` | `relay::{Relay, RelayBuilder, RelayHandle}`: an in-process loopback proxy on a Tokio runtime |
+| `relay-blocking` | `httparse`, `getrandom`, `subtle` (no Tokio) | `relay::blocking::*`: the same relay on `std::net` and its own threads |
 
 Imports: the root re-exports `Resolver`, `ResolverBuilder`, `ProxySetting`, `OnMissingEngine`,
 `ChildEnvironment`, `Proxy`, `ProxyBuilder`, `ProxyScheme`, `Route`, `Credentials`, `Secret`,
@@ -220,12 +221,19 @@ Request, Version, Reply}`. Every `decode` takes the bytes read so far and return
 `Progress::Incomplete(n)`, `Progress::Complete { value, consumed }` or an error; none panics on any
 input.
 
-## The in-process relay (`coqui_proxy::relay`, feature `relay`)
+## The in-process relay (`coqui_proxy::relay`, features `relay` and `relay-blocking`)
+
+Two relays with one security model, one `RelaySettings` and one behaviour: `relay::Relay` (feature `relay`) runs as
+tasks on a Tokio runtime over the asynchronous connector; `relay::blocking::Relay` (feature `relay-blocking`) runs on
+its own threads over the blocking connector and needs no Tokio (`cargo tree -e normal --no-default-features
+--features relay-blocking` lists none). The first half of this section is the asynchronous relay; the blocking one
+follows it.
 
 ```rust
 Relay::builder(connector: asynch::ProxyConnector, resolver: Resolver) -> RelayBuilder
 RelayBuilder::{settings(RelaySettings), non_defaults() -> Vec<String>, build() -> Result<Relay, Error>, start() -> Result<RelayHandle, Error>}
-Relay::{start(self) -> Result<RelayHandle, Error>, settings() -> &RelaySettings}
+Relay::{start(self) -> Result<RelayHandle, Error>, start_on(self, &tokio::runtime::Handle) -> Result<RelayHandle, Error>, settings() -> &RelaySettings, not_applied() -> Vec<&'static str>}
+RelayBuilder::{start_on(&Handle), not_applied() -> Vec<&'static str>}
 RelayHandle::{address() -> SocketAddr, proxy_url() -> String, proxy() -> &Proxy, credentials() -> &Credentials, token_header() -> (&'static str, &str), shutdown(self) /* async */}
 relay::TOKEN_HEADER: &str   // "x-coqui-relay-token"
 ```
@@ -233,8 +241,10 @@ relay::TOKEN_HEADER: &str   // "x-coqui-relay-token"
 A loopback HTTP proxy that runs as tasks on the caller's Tokio runtime and sends every request
 through the connector (its routes, failover and `bad_proxy_ttl`, PAC, bypass rules, SOCKS and proxy
 login, `Direct`), for an HTTP client that cannot take a connector or retry a route. `start` does
-not wait and is not `async`, but needs a runtime (`Error::Io` otherwise) and returns once the
-listener is bound. It stops, and ends every connection and tunnel it serves, when the
+not wait and is not `async`, but needs a runtime (`Error::Io` otherwise, its message names `start_on`) and returns once the
+listener is bound. `start()` uses the runtime the calling thread is in; `start_on(&handle)` runs the relay on a runtime
+handle the caller names, from any thread (a client built on the main thread, a runtime owned elsewhere), and the runtime
+must outlive the relay's use. It stops, and ends every connection and tunnel it serves, when the
 `RelayHandle` is dropped or on `shutdown().await` (which returns when the listener is closed);
 keep the handle as long as the client.
 
@@ -260,10 +270,37 @@ keep the handle as long as the client.
 
 `RelaySettings` (also at the crate root; `#[non_exhaustive]`, `Default`, `DEFAULT_*`, `non_defaults()`):
 `address` 127.0.0.1, `port` 0 (any free), `max_connections` 256 (more connections wait in the
-listener's backlog), `header_timeout` 30 s (a head sent slower is cut off), `idle_timeout` 300 s (no
+listener's backlog; the blocking relay answers `503` and closes them), `header_timeout` 30 s (a head sent slower is cut off), `idle_timeout` 300 s (no
 byte either way on the client's or the destination's connection closes it; a reply that begins
 later than this is cut), `max_head_bytes` 64 KiB (longer: `431`, minimum 8 KiB), `accept_retry`
-100 ms. Raising any of the first five is listed by `non_defaults()`.
+100 ms, `shutdown_wait` 5 s and `poll_interval` 10 ms (both blocking relay only, see below). Raising any of the
+first five, or `shutdown_wait`, is listed by `non_defaults()`. `not_applied()` on the async relay lists
+`shutdown_wait` and `poll_interval`; on the blocking one it is empty.
+
+### The blocking relay (`coqui_proxy::relay::blocking`, feature `relay-blocking`)
+
+```rust
+relay::blocking::Relay::builder(connector: ProxyConnector, resolver: Resolver) -> RelayBuilder
+RelayBuilder::{settings(RelaySettings), non_defaults() -> Vec<String>, not_applied() -> Vec<&'static str>, build() -> Result<Relay, Error>, start() -> Result<RelayHandle, Error>}
+Relay::{start(self) -> Result<RelayHandle, Error>, settings() -> &RelaySettings, not_applied()}
+RelayHandle::{address(), proxy_url(), proxy(), credentials(), token_header(), shutdown(self)}  // as the async handle; `shutdown` is a plain fn
+```
+
+Same requests, replies, `407`/`502`/`405`/`400`/`431` answers, credential and token header, and loopback rule as above
+(the code that checks the credential, strips hop-by-hop headers and sets `Host` is shared). Differences:
+
+- `std::net` listener on an accept thread; one thread per connection. A connection over `max_connections` is
+  answered `503` and closed at once.
+- Heads are read with `httparse`; a request whose body framing disagrees with itself (`Content-Length` with
+  `Transfer-Encoding`, two different lengths, a coding that does not end in `chunked`) is `400`. The destination is sent
+  `Connection: close`; a body is copied by length or by chunks, a reply with neither is copied to the end and the
+  client's connection is closed after it. `HEAD`, `204` and `304` replies have no body; interim `1xx` replies pass.
+- A `CONNECT` tunnel is spliced by two threads. When the destination connection is TLS (an `https:` proxy, feature
+  `tls`), one thread looks at both sides every `poll_interval` instead, because a TLS stream cannot be read and
+  written from two threads; `poll_interval` is the most latency that adds.
+- Dropping the handle (or `shutdown()`) closes the listener, shuts every connection's sockets and joins the threads, but
+  waits at most `shutdown_wait`; a thread still dialling a destination finishes on its own (`Duration::ZERO`: do not wait).
+- It never needs a runtime, and is `Send + Sync` (a `reqwest::Proxy::custom` closure may own it).
 
 ## Login (`coqui_proxy::auth`)
 
@@ -306,6 +343,7 @@ Every bound is a field with a `DEFAULT_*` constant; each type has `Default` and 
 | `RelaySettings::address`, `::port` | `127.0.0.1` (loopback only), 0 |
 | `::max_connections`, `::header_timeout`, `::idle_timeout` | 256, 30 s, 300 s |
 | `::max_head_bytes`, `::accept_retry` | 64 KiB (at least 8 KiB), 100 ms |
+| `::shutdown_wait`, `::poll_interval` | 5 s, 10 ms (blocking relay only; `poll_interval` must not be zero) |
 
 A whole PAC download may take three times `download_timeout`.
 
@@ -337,4 +375,5 @@ system readers `XDG_CONFIG_HOME` and `HOME` (KDE's `kioslaverc`). Helper program
 - `Resolver::lookup` blocks (DNS, downloads, helper programs); async callers use
   `spawn_blocking`.
 - A relay's `proxy_url()` carries no credential: a client must be given `credentials()` as proxy
-  login, or it gets `407` for everything. A relay serves only while its `RelayHandle` lives.
+  login, or it gets `407` for everything. A relay serves only while its `RelayHandle` lives. `relay::Relay::start` outside a Tokio runtime is an error: use
+  `start_on` with a handle, or the blocking relay.

@@ -34,3 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   connector, with a random per-relay `Proxy-Authorization: Basic` credential, for clients that cannot take
   a connector (`reqwest`) but should still get failover, PAC, bypass rules and proxy login. The credential is
   also accepted in the `x-coqui-relay-token` header, which a client keeps across a redirect to another host.
+- `relay::Relay::start_on` and `RelayBuilder::start_on`: start the relay on a Tokio runtime handle the caller names,
+  from any thread; `start()` outside a runtime now says to call it.
+- `relay::blocking` (feature `relay-blocking`, no Tokio): `Relay`, `RelayBuilder`, `RelayHandle`: the relay on `std::net`
+  with an accept thread and a thread for each connection, over the blocking connector, with the async relay's security
+  model and settings. A connection over `max_connections` is answered `503`; dropping the handle closes the listener,
+  ends the connections and joins the threads.
+- `RelaySettings::{shutdown_wait, poll_interval}` (blocking relay only) and `not_applied()` on both relays, which lists
+  the settings that mean nothing to that relay.

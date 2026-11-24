@@ -39,7 +39,8 @@ cargo add --git https://github.com/Boriken-Dev/coqui-proxy coqui-proxy
 | `libproxy` | `libloading`: `system::LibProxySource` (Unix) | off |
 | `tokio` | `tokio`, `tokio-rustls`: `asynch::ProxyConnector`, `asynch::lookup` | off |
 | `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service`: `hyper::Connector`, a `tower` service for hyper's client | off |
-| `relay` | `hyper` with its server and client, `http-body-util`, `bytes`, `getrandom`, `subtle`: `relay::Relay`, a loopback proxy started in-process | off |
+| `relay` | `hyper` with its server and client, `http-body-util`, `bytes`, `getrandom`, `subtle`: `relay::Relay`, a loopback proxy started in-process on a Tokio runtime | off |
+| `relay-blocking` | `httparse`, `getrandom`, `subtle`: `relay::blocking::Relay`, the same relay on its own threads, with no Tokio | off |
 
 ## Quick start
 
@@ -85,6 +86,18 @@ let relay = Relay::builder(ProxyConnector::default().asynch(), Resolver::system(
 # }
 ```
 
+`start()` uses the Tokio runtime the caller is in; `start_on(&handle)` takes a runtime handle, for a client built
+outside it. A program with no Tokio uses `relay::blocking::Relay` (feature `relay-blocking`), which runs on its own
+threads over the blocking connector and stops, joining them, when its handle is dropped:
+
+```rust,ignore
+use coqui_proxy::{ProxyConnector, Resolver, relay::blocking::Relay};
+
+let relay = Relay::builder(ProxyConnector::default(), Resolver::system()).start()?;
+# let _ = relay;
+# Ok::<(), coqui_proxy::Error>(())
+```
+
 The environment for a child process that cannot ask, from the same decision:
 
 ```rust
@@ -127,7 +140,7 @@ assert_eq!(resolver.lookup("https://a.corp.example/")?, [Route::Direct]);
 | `pac` | `PacScript`, `PacSource`, `FindProxy`, `discover`, `builtin_names` (feature `pac`) |
 | `asynch` | the connector on Tokio: `ProxyConnector`, `Connection`, `lookup` (feature `tokio`) |
 | `hyper` | `Connector`, a `tower` service that returns a tunnel (feature `hyper`) |
-| `relay` | `Relay`, `RelayBuilder`, `RelayHandle`: a loopback proxy started in-process, for clients that cannot take a connector (feature `relay`) |
+| `relay` | `Relay`, `RelayBuilder`, `RelayHandle`: a loopback proxy started in-process, for clients that cannot take a connector (feature `relay`); `relay::blocking` is the same without Tokio (feature `relay-blocking`) |
 | `connect` | the sans-I/O cores: `core::{ConnectRequest, ConnectResponse, ProxyLogin}`, `socks::{Greeting, Request, Reply}` |
 | `auth` | `Negotiate`, `OriginAuth`, `OriginLogin`, `negotiate_available` |
 
