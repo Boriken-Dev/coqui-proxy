@@ -526,18 +526,18 @@ fn connections_past_the_limit_are_answered_503_and_a_free_slot_is_reused() {
     assert_eq!(second.read_to_end(&mut rest).unwrap_or(0), 0);
 
     drop(first);
-    // The slot is free once the relay has seen the first connection go.
+    // The slot is free once the relay has seen the first connection go. An answer of `503` can
+    // race the request that was sent on the connection it closes, which then reads as a reset.
     let started = Instant::now();
     loop {
-        let (head, _) = request(
-            &handle,
-            "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
-        );
-        if head.starts_with("HTTP/1.1 407") {
+        let mut stream = connect(&handle);
+        let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        if answer.starts_with("HTTP/1.1 407") {
             break;
         }
-        assert!(head.starts_with("HTTP/1.1 503"), "{head}");
-        assert!(started.elapsed() < Duration::from_secs(10), "{head}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{answer}");
         thread::sleep(Duration::from_millis(50));
     }
 }
