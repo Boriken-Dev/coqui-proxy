@@ -24,8 +24,8 @@ mod netutil;
 #[cfg(feature = "pac")]
 pub mod pac;
 mod proxy;
-#[cfg(feature = "relay")]
-#[cfg_attr(docsrs, doc(cfg(feature = "relay")))]
+#[cfg(any(feature = "relay", feature = "relay-blocking"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "relay", feature = "relay-blocking"))))]
 pub mod relay;
 mod resolver;
 pub mod settings;

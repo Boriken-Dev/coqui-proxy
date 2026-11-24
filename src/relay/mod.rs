@@ -94,6 +94,9 @@ use crate::settings::RelaySettings;
 
 #[cfg(feature = "relay")]
 mod asynch;
+#[cfg(feature = "relay-blocking")]
+#[cfg_attr(docsrs, doc(cfg(feature = "relay-blocking")))]
+pub mod blocking;
 
 #[cfg(feature = "relay")]
 #[cfg_attr(docsrs, doc(cfg(feature = "relay")))]

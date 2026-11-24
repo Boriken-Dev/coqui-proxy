@@ -32,6 +32,9 @@ hyper = ["tokio", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
 # `relay::Relay`: a loopback HTTP proxy started in-process that sends what it is given through the connector, so an
 # HTTP client that cannot take a connector (reqwest) still gets failover, PAC, rules and proxy login.
 relay = ["hyper", "tokio/sync", "hyper/server", "hyper/client", "hyper/http1", "dep:http-body-util", "dep:bytes", "dep:getrandom", "dep:subtle"]
+# `relay::blocking::Relay`: the same relay on `std::net` and its own threads, over the blocking connector, with no
+# Tokio.
+relay-blocking = ["dep:httparse", "dep:getrandom", "dep:subtle"]
 # Negotiate and NTLM proxy and server login: SSPI on Windows, GSSAPI elsewhere (needs the system's GSSAPI library
 # and, to build, libclang).
 negotiate = ["dep:libgssapi"]
@@ -76,10 +79,12 @@ tower-service = { version = "0.3", optional = true }
 # The relay's bodies (feature `relay`).
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
-# The relay's per-start credential, from the operating system's random source (feature `relay`).
+# The relay's per-start credential, from the operating system's random source (features `relay` and `relay-blocking`).
 getrandom = { version = "0.3", optional = true }
-# Constant-time comparison of the relay's credential (feature `relay`).
+# Constant-time comparison of the relay's credential (features `relay` and `relay-blocking`).
 subtle = { version = "2", default-features = false, optional = true }
+# The blocking relay's request and reply heads (feature `relay-blocking`).
+httparse = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
