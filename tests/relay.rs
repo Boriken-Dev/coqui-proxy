@@ -578,3 +578,38 @@ async fn the_relay_runs_on_a_current_thread_runtime() {
     let (_, body) = request(&handle, &get_through(&handle, &url, "")).await;
     assert_eq!(body, "single");
 }
+
+#[tokio::test]
+async fn the_token_header_is_accepted_in_place_of_the_login_and_never_forwarded() {
+    let origin = StandInOrigin::start("by token");
+    let handle = relay(direct());
+    let (name, token) = handle.token_header();
+    assert_eq!(name, coqui_proxy::relay::TOKEN_HEADER);
+    let url = format!("http://127.0.0.1:{}/", origin.addr.port());
+    let text =
+        format!("GET {url} HTTP/1.1\r\nHost: x\r\n{name}: {token}\r\nConnection: close\r\n\r\n");
+    let (head, body) = request(&handle, &text).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(body, "by token");
+    assert_eq!(origin.seen()[0].header(name), None);
+
+    let mut stream = connect(&handle).await;
+    stream
+        .write_all(
+            format!(
+                "CONNECT 127.0.0.1:{} HTTP/1.1\r\nHost: x\r\n{name}: {token}\r\n\r\n",
+                origin.addr.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let (head, _) = read_reply(&mut stream).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    let wrong =
+        format!("GET {url} HTTP/1.1\r\nHost: x\r\n{name}: {token}x\r\nConnection: close\r\n\r\n");
+    let (head, _) = request(&handle, &wrong).await;
+    assert!(head.starts_with("HTTP/1.1 407"), "{head}");
+    assert_eq!(origin.seen().len(), 1);
+}

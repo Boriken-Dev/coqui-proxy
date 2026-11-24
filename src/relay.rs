@@ -21,9 +21,14 @@
 //! The relay has no access control but its credential, so it listens on a loopback address only
 //! (a [`RelaySettings::address`] that is not one is an error) and every request must carry
 //! `Proxy-Authorization: Basic` with a random credential made for each relay (256 bits from the
-//! operating system's generator), compared in constant time. Another local user or process
-//! cannot use it without having read it. The credential never reaches a log, an error or a
-//! `Debug`, and is never forwarded. Each bound of [`RelaySettings`] is a setting.
+//! operating system's generator), or the same secret in the [`TOKEN_HEADER`] header, compared in
+//! constant time. Another local user or process cannot use it without having read it. The
+//! credential never reaches a log, an error or a `Debug`, and is never forwarded. Each bound of
+//! [`RelaySettings`] is a setting.
+//!
+//! The header exists for clients that drop `Proxy-Authorization` when a redirect leads to another
+//! host (`reqwest` does for plain `http:` requests, which would then get `407`): a header of
+//! another name is kept.
 //!
 //! It runs on the caller's Tokio runtime and has no thread of its own.
 //!
@@ -89,6 +94,10 @@ use crate::settings::RelaySettings;
 
 /// The user name of the relay's credential.
 const USER: &str = "coqui-relay";
+
+/// The header that carries the relay's password as it is, instead of `Proxy-Authorization`, for
+/// a client that keeps only headers it does not know to be credentials across a redirect.
+pub const TOKEN_HEADER: &str = "x-coqui-relay-token";
 
 /// Bytes of randomness in a relay's password (256 bits).
 const PASSWORD_BYTES: usize = 32;
@@ -176,6 +185,7 @@ impl Relay {
             connector: self.connector,
             resolver: self.resolver,
             expected: expected.into_bytes(),
+            token: credentials.password().as_bytes().to_vec(),
             settings: self.settings,
             tasks: Mutex::new(JoinSet::new()),
         });
@@ -311,6 +321,13 @@ impl RelayHandle {
         &self.credentials
     }
 
+    /// The header name and value that carry the credential without `Proxy-Authorization`: for a
+    /// client that sends a proxy's headers on every request and redirect hop ([`TOKEN_HEADER`]).
+    #[must_use]
+    pub fn token_header(&self) -> (&'static str, &str) {
+        (TOKEN_HEADER, self.credentials.password())
+    }
+
     /// Stops the relay and waits until its listener is closed.
     pub async fn shutdown(mut self) {
         if let Some(task) = self.task.take() {
@@ -334,6 +351,7 @@ struct Shared {
     connector: ProxyConnector,
     resolver: Resolver,
     expected: Vec<u8>,
+    token: Vec<u8>,
     settings: RelaySettings,
     /// Tunnels and connections to destinations: tasks that outlive the request that made them.
     tasks: Mutex<JoinSet<()>>,
@@ -403,7 +421,7 @@ async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>, slot: Slot) {
 }
 
 async fn handle(request: Request<Incoming>, shared: Arc<Shared>, slot: Slot) -> Response<Body> {
-    if !authorized(request.headers(), &shared.expected) {
+    if !authorized(request.headers(), &shared.expected, &shared.token) {
         let mut reply = status(StatusCode::PROXY_AUTHENTICATION_REQUIRED, "");
         reply.headers_mut().insert(
             PROXY_AUTHENTICATE,
@@ -422,11 +440,17 @@ async fn handle(request: Request<Incoming>, shared: Arc<Shared>, slot: Slot) -> 
     status(StatusCode::METHOD_NOT_ALLOWED, "")
 }
 
-/// Whether `Proxy-Authorization` is the relay's credential, compared in constant time.
-fn authorized(headers: &HeaderMap, expected: &[u8]) -> bool {
-    headers
-        .get(PROXY_AUTHORIZATION)
-        .is_some_and(|given| bool::from(given.as_bytes().ct_eq(expected)))
+/// Whether `Proxy-Authorization` or the token header is the relay's credential, compared in
+/// constant time (both are compared, so that which one matched is not a timing).
+fn authorized(headers: &HeaderMap, expected: &[u8], token: &[u8]) -> bool {
+    let matches = |name, wanted: &[u8]| {
+        headers
+            .get(name)
+            .is_some_and(|given| bool::from(given.as_bytes().ct_eq(wanted)))
+    };
+    let by_login = matches(PROXY_AUTHORIZATION.as_str(), expected);
+    let by_token = matches(TOKEN_HEADER, token);
+    by_login | by_token
 }
 
 fn status(code: StatusCode, text: &str) -> Response<Body> {
@@ -514,6 +538,7 @@ async fn forward(request: Request<Incoming>, shared: &Arc<Shared>) -> Response<B
 
     let mut headers = parts.headers;
     strip_hop_by_hop(&mut headers);
+    headers.remove(TOKEN_HEADER);
     headers.insert(HOST, host);
     let target = parts
         .uri
