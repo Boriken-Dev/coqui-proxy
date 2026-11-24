@@ -12,7 +12,7 @@ keywords = ["proxy", "pac", "wpad", "socks", "system"]
 categories = ["network-programming"]
 # Git dependencies cannot be published to crates.io.
 publish = false
-exclude = [".*", "*.local.*", "/tools/"]
+exclude = [".*", "*.local.*", "/tools/", "/packaging/"]
 
 [package.metadata.docs.rs]
 all-features = true
