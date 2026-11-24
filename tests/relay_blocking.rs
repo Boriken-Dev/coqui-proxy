@@ -1025,3 +1025,28 @@ mod https_proxy {
         assert!(get_in(&mut connected, "app.internal.test").ends_with("via https"));
     }
 }
+
+#[test]
+fn a_body_may_arrive_more_slowly_than_a_head_may() {
+    let origin = FramingOrigin::start();
+    let handle = small(|s| {
+        s.header_timeout = Duration::from_millis(300);
+        s.idle_timeout = Duration::from_secs(60);
+    });
+    let url = format!("http://127.0.0.1:{}/echo", origin.addr.port());
+    let mut stream = connect(&handle);
+    // The head comes in two parts, so the time left for it is what the second read waits with.
+    let first = format!(
+        "POST {url} HTTP/1.1\r\nHost: h\r\nProxy-Authorization: {}\r\nContent-Length: 5\r\n",
+        basic(&handle)
+    );
+    stream.write_all(first.as_bytes()).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    stream.write_all(b"Connection: close\r\n\r\nsl").unwrap();
+    // The head was complete long ago: only the idle time bounds the rest of the body.
+    thread::sleep(Duration::from_millis(900));
+    stream.write_all(b"owl").unwrap();
+    let (head, body) = read_reply(&mut stream);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(body, "slowl");
+}

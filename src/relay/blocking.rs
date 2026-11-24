@@ -774,6 +774,8 @@ fn serve(stream: TcpStream, shared: &Shared, id: u64) {
             );
             return;
         }
+        // A body is read with the idle time, not what was left of the time for the head.
+        let _ = client.inner.set_read_timeout(Some(settings.idle_timeout));
         if head.method == Method::CONNECT {
             tunnel(client, &head, shared, id);
             return;
