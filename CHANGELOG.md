@@ -42,3 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ends the connections and joins the threads.
 - `RelaySettings::{shutdown_wait, poll_interval}` (blocking relay only) and `not_applied()` on both relays, which lists
   the settings that mean nothing to that relay.
+- `tools/sdk.lock` and the `deps` branch's pin in it; `packaging/container/Containerfile` builds the library and runs its tests
+  from the `deps` branch with no network, through `python3 tools/build.py container build|test`; `.env.example` lists the
+  overrides.
