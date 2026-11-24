@@ -1,56 +1,5 @@
-//! A loopback HTTP proxy started inside the process, that sends what it is given through a
-//! [`ProxyConnector`].
-//!
-//! An HTTP client that cannot take a connector, or retry a route (`reqwest`), is given the relay
-//! as its only proxy and gets everything the connector does: the routes of a [`Resolver`] with
-//! failover, PAC, bypass rules and proxy login, SOCKS and a direct connection.
-//!
-//! # What it serves
-//!
-//! - `CONNECT host:port`: the destination is dialled through the connector, then `200` and a
-//!   splice in both directions. TLS to the destination is the client's.
-//! - An absolute-form `http://` request: the destination is dialled through the connector and
-//!   the request forwarded in origin form, without its hop-by-hop headers, the reply streamed
-//!   back. A connection to the destination serves one request; the client's connection to the
-//!   relay is kept alive.
-//! - A dial that fails on every route is `502`; a request without the credential is `407`; any
-//!   other request is `405`.
-//!
-//! # Security
-//!
-//! The relay has no access control but its credential, so it listens on a loopback address only
-//! (a [`RelaySettings::address`] that is not one is an error) and every request must carry
-//! `Proxy-Authorization: Basic` with a random credential made for each relay (256 bits from the
-//! operating system's generator), or the same secret in the [`TOKEN_HEADER`] header, compared in
-//! constant time. Another local user or process cannot use it without having read it. The
-//! credential never reaches a log, an error or a `Debug`, and is never forwarded. Each bound of
-//! [`RelaySettings`] is a setting.
-//!
-//! The header exists for clients that drop `Proxy-Authorization` when a redirect leads to another
-//! host (`reqwest` does for plain `http:` requests, which would then get `407`): a header of
-//! another name is kept.
-//!
-//! It runs on the caller's Tokio runtime and has no thread of its own.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use coqui_proxy::relay::Relay;
-//! use coqui_proxy::{ProxyConnector, Resolver};
-//!
-//! # async fn run() -> Result<(), coqui_proxy::Error> {
-//! let relay = Relay::builder(ProxyConnector::default().asynch(), Resolver::system()).start()?;
-//! // A client sends `Proxy-Authorization: Basic` with these, to this URL.
-//! let (url, user, password) = (
-//!     relay.proxy_url(),
-//!     relay.credentials().username(),
-//!     relay.credentials().password(),
-//! );
-//! # let _ = (url, user, password);
-//! relay.shutdown().await;
-//! # Ok(())
-//! # }
-//! ```
+//! The relay on a Tokio runtime: hyper's HTTP/1 server on the accepted side, hyper's client
+//! connection on the dialled side, the asynchronous connector in between.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -66,52 +15,28 @@ use core::time::Duration;
 use std::io;
 use std::sync::Mutex;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use http::header::{
-    CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
-    TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
-};
+use http::header::{HOST, HeaderValue, PROXY_AUTHENTICATE};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::{Either, Empty, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, Sleep};
 
+use super::{
+    CHALLENGE, Guard, TOKEN_HEADER, check_settings, host_header, strip_hop_by_hop, tunnel_scheme,
+};
 use crate::connect::asynch::ProxyConnector;
-use crate::error::{Error, Reason};
+use crate::error::Error;
 use crate::proxy::{Credentials, Proxy, ProxyScheme};
 use crate::resolver::Resolver;
 use crate::settings::RelaySettings;
-
-/// The user name of the relay's credential.
-const USER: &str = "coqui-relay";
-
-/// The header that carries the relay's password as it is, instead of `Proxy-Authorization`, for
-/// a client that keeps only headers it does not know to be credentials across a redirect.
-pub const TOKEN_HEADER: &str = "x-coqui-relay-token";
-
-/// Bytes of randomness in a relay's password (256 bits).
-const PASSWORD_BYTES: usize = 32;
-
-/// Headers a proxy does not forward, besides those the `Connection` header names.
-const HOP_BY_HOP: [HeaderName; 7] = [
-    CONNECTION,
-    PROXY_AUTHENTICATE,
-    PROXY_AUTHORIZATION,
-    TE,
-    TRAILER,
-    TRANSFER_ENCODING,
-    UPGRADE,
-];
 
 type Body = Either<Full<Bytes>, Either<Empty<Bytes>, Incoming>>;
 
@@ -149,28 +74,41 @@ impl Relay {
         &self.settings
     }
 
+    /// The settings that mean nothing to this relay, whatever their value: it runs on a Tokio
+    /// runtime and has no thread of its own to join or poll.
+    #[must_use]
+    pub fn not_applied(&self) -> Vec<&'static str> {
+        not_applied()
+    }
+
     /// Binds the listener and serves on the current Tokio runtime until the handle is dropped or
     /// shut down. It does not wait: the listener is bound when it returns.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when there is no Tokio runtime, the address cannot be bound or the system's
-    /// random source fails.
+    /// [`Error::Io`] when there is no Tokio runtime (call [`Relay::start_on`] with a handle
+    /// instead), the address cannot be bound or the system's random source fails.
     pub fn start(self) -> Result<RelayHandle, Error> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             Error::Io(io::Error::other(
-                "the relay needs a Tokio runtime to run on",
+                "there is no Tokio runtime to run the relay on: start it inside one, or call start_on with a runtime handle",
             ))
         })?;
-        let mut secret = [0u8; PASSWORD_BYTES];
-        getrandom::fill(&mut secret)
-            .map_err(|error| Error::Io(io::Error::other(error.to_string())))?;
-        let password = URL_SAFE_NO_PAD.encode(secret);
-        let credentials = Credentials::new(USER, password);
-        let expected = format!(
-            "Basic {}",
-            STANDARD.encode(alloc::format!("{USER}:{}", credentials.password()))
-        );
+        self.start_on(&runtime)
+    }
+
+    /// Binds the listener and serves on `runtime`, which may be one the calling thread is not in
+    /// (a client built on the main thread, a runtime owned elsewhere), until the handle is
+    /// dropped or shut down. It does not wait: the listener is bound when it returns.
+    ///
+    /// The runtime must outlive the handle's use: when it is shut down, the relay stops serving.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the address cannot be bound or the system's random source fails.
+    pub fn start_on(self, runtime: &tokio::runtime::Handle) -> Result<RelayHandle, Error> {
+        let guard = Guard::generate()?;
+        let credentials = guard.credentials.clone();
 
         let listener = std::net::TcpListener::bind((self.settings.address, self.settings.port))?;
         listener.set_nonblocking(true)?;
@@ -184,8 +122,7 @@ impl Relay {
         let shared = Arc::new(Shared {
             connector: self.connector,
             resolver: self.resolver,
-            expected: expected.into_bytes(),
-            token: credentials.password().as_bytes().to_vec(),
+            guard,
             settings: self.settings,
             tasks: Mutex::new(JoinSet::new()),
         });
@@ -197,6 +134,13 @@ impl Relay {
             task: Some(task),
         })
     }
+}
+
+fn not_applied() -> Vec<&'static str> {
+    alloc::vec![
+        "shutdown_wait: the relay's tasks are aborted at once; there is no thread to join",
+        "poll_interval: tunnels are driven by the runtime, not polled",
+    ]
 }
 
 /// Configures a [`Relay`].
@@ -230,6 +174,13 @@ impl RelayBuilder {
         self.settings.non_defaults()
     }
 
+    /// The settings that mean nothing to this relay, whatever their value (see
+    /// [`Relay::not_applied`]).
+    #[must_use]
+    pub fn not_applied(&self) -> Vec<&'static str> {
+        not_applied()
+    }
+
     /// The relay, once the settings are checked.
     ///
     /// # Errors
@@ -238,24 +189,7 @@ impl RelayBuilder {
     /// by its credential alone), a zero count or time, or a head limit under
     /// [`RelaySettings::MIN_MAX_HEAD_BYTES`].
     pub fn build(self) -> Result<Relay, Error> {
-        let settings = &self.settings;
-        if !settings.address.is_loopback() {
-            return Err(refused("the relay listens on a loopback address only"));
-        }
-        if settings.max_connections == 0 {
-            return Err(refused("max_connections must be at least 1"));
-        }
-        if settings.header_timeout.is_zero()
-            || settings.idle_timeout.is_zero()
-            || settings.accept_retry.is_zero()
-        {
-            return Err(refused("a relay time limit must not be zero"));
-        }
-        if settings.max_head_bytes < RelaySettings::MIN_MAX_HEAD_BYTES {
-            return Err(refused(
-                "max_head_bytes is under the 8 KiB the HTTP/1 server works with",
-            ));
-        }
+        check_settings(&self.settings)?;
         Ok(Relay {
             connector: self.connector,
             resolver: self.resolver,
@@ -271,10 +205,16 @@ impl RelayBuilder {
     pub fn start(self) -> Result<RelayHandle, Error> {
         self.build()?.start()
     }
-}
 
-fn refused(reason: &'static str) -> Error {
-    Error::Settings(Reason::new(reason))
+    /// Checks the settings and starts the relay on `runtime`: [`RelayBuilder::build`] then
+    /// [`Relay::start_on`].
+    ///
+    /// # Errors
+    ///
+    /// As those two.
+    pub fn start_on(self, runtime: &tokio::runtime::Handle) -> Result<RelayHandle, Error> {
+        self.build()?.start_on(runtime)
+    }
 }
 
 /// A running relay. It stops when it is dropped, or on [`RelayHandle::shutdown`]: the listener
@@ -350,8 +290,7 @@ impl Drop for RelayHandle {
 struct Shared {
     connector: ProxyConnector,
     resolver: Resolver,
-    expected: Vec<u8>,
-    token: Vec<u8>,
+    guard: Guard,
     settings: RelaySettings,
     /// Tunnels and connections to destinations: tasks that outlive the request that made them.
     tasks: Mutex<JoinSet<()>>,
@@ -421,12 +360,11 @@ async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>, slot: Slot) {
 }
 
 async fn handle(request: Request<Incoming>, shared: Arc<Shared>, slot: Slot) -> Response<Body> {
-    if !authorized(request.headers(), &shared.expected, &shared.token) {
+    if !shared.guard.allows(request.headers()) {
         let mut reply = status(StatusCode::PROXY_AUTHENTICATION_REQUIRED, "");
-        reply.headers_mut().insert(
-            PROXY_AUTHENTICATE,
-            HeaderValue::from_static("Basic realm=\"coqui-proxy relay\""),
-        );
+        reply
+            .headers_mut()
+            .insert(PROXY_AUTHENTICATE, HeaderValue::from_static(CHALLENGE));
         return reply;
     }
     if request.method() == Method::CONNECT {
@@ -438,19 +376,6 @@ async fn handle(request: Request<Incoming>, shared: Arc<Shared>, slot: Slot) -> 
         return forward(request, &shared).await;
     }
     status(StatusCode::METHOD_NOT_ALLOWED, "")
-}
-
-/// Whether `Proxy-Authorization` or the token header is the relay's credential, compared in
-/// constant time (both are compared, so that which one matched is not a timing).
-fn authorized(headers: &HeaderMap, expected: &[u8], token: &[u8]) -> bool {
-    let matches = |name, wanted: &[u8]| {
-        headers
-            .get(name)
-            .is_some_and(|given| bool::from(given.as_bytes().ct_eq(wanted)))
-    };
-    let by_login = matches(PROXY_AUTHORIZATION.as_str(), expected);
-    let by_token = matches(TOKEN_HEADER, token);
-    by_login | by_token
 }
 
 fn status(code: StatusCode, text: &str) -> Response<Body> {
@@ -483,7 +408,7 @@ async fn tunnel(
         .map(ToString::to_string)
         .unwrap_or_default();
     // The scheme tells the resolver which proxy variable and PAC branch apply.
-    let scheme = if port == 80 { "http" } else { "https" };
+    let scheme = tunnel_scheme(port);
     let destination = match shared
         .connector
         .connect_url(&shared.resolver, &format!("{scheme}://{authority}/"))
@@ -560,30 +485,6 @@ async fn forward(request: Request<Incoming>, shared: &Arc<Shared>) -> Response<B
         }
         Err(error) => bad_gateway(&Error::Io(io::Error::other(error))),
     }
-}
-
-/// `Host` for a destination: its name and port, without any login in the URL.
-fn host_header(authority: &http::uri::Authority) -> String {
-    match authority.port() {
-        Some(port) => format!("{}:{port}", authority.host()),
-        None => authority.host().to_string(),
-    }
-}
-
-/// Removes what a proxy does not forward: the fixed list and every header `Connection` names.
-fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    let named: Vec<HeaderName> = headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim().as_bytes()).ok())
-        .collect();
-    for name in named.iter().chain(&HOP_BY_HOP) {
-        headers.remove(name);
-    }
-    headers.remove("keep-alive");
-    headers.remove("proxy-connection");
 }
 
 /// A stream that fails with `TimedOut` once `limit` passes with no byte read or written.

@@ -328,8 +328,9 @@ pub struct RelaySettings {
     pub address: core::net::IpAddr,
     /// The port to listen on (0: the system picks a free one).
     pub port: u16,
-    /// The most client connections served at once (256). Past it, new connections wait in the
-    /// listener's backlog. Raising it lets more local clients hold sockets and tasks.
+    /// The most client connections served at once (256). Past it, the asynchronous relay lets new
+    /// connections wait in the listener's backlog and the blocking one answers `503` and closes them.
+    /// Raising it lets more local clients hold sockets and tasks or threads.
     pub max_connections: usize,
     /// How long a client may take to send a request head (30 s). Raising it lets a client hold a
     /// connection slot while sending slowly.
@@ -344,6 +345,17 @@ pub struct RelaySettings {
     /// How long the listener waits after a failed `accept` (a full descriptor table, for
     /// example) before trying again (100 ms).
     pub accept_retry: Duration,
+    /// How long dropping or shutting down a [`blocking`](crate::relay::blocking) relay waits for
+    /// its threads to end before it stops waiting and leaves them to finish on their own (5 s;
+    /// zero: do not wait). A thread that is still dialling a destination ends when the dial
+    /// does. Raising it makes a drop block for longer. Meaningless to the asynchronous relay.
+    pub shutdown_wait: Duration,
+    /// How often a [blocking](crate::relay::blocking) relay looks at both sides of a tunnel to an
+    /// `https:` proxy (10 ms), which one thread serves because a TLS stream cannot be read and
+    /// written from two. A tunnel through a plain connection uses two threads and no polling.
+    /// Lowering it answers sooner and wakes the thread more often. Meaningless to the
+    /// asynchronous relay.
+    pub poll_interval: Duration,
 }
 
 impl RelaySettings {
@@ -362,6 +374,10 @@ impl RelaySettings {
     pub const DEFAULT_MAX_HEAD_BYTES: usize = 64 * 1024;
     /// The default pause after a failed `accept`.
     pub const DEFAULT_ACCEPT_RETRY: Duration = Duration::from_millis(100);
+    /// The default wait for a blocking relay's threads when it stops.
+    pub const DEFAULT_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+    /// The default polling interval of a tunnel through an `https:` proxy.
+    pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
     /// The smallest request head limit the HTTP/1 server accepts.
     pub const MIN_MAX_HEAD_BYTES: usize = 8 * 1024;
 }
@@ -376,6 +392,8 @@ impl Default for RelaySettings {
             idle_timeout: Self::DEFAULT_IDLE_TIMEOUT,
             max_head_bytes: Self::DEFAULT_MAX_HEAD_BYTES,
             accept_retry: Self::DEFAULT_ACCEPT_RETRY,
+            shutdown_wait: Self::DEFAULT_SHUTDOWN_WAIT,
+            poll_interval: Self::DEFAULT_POLL_INTERVAL,
         }
     }
 }
@@ -409,6 +427,12 @@ impl RelaySettings {
             loose.push(alloc::format!(
                 "max_head_bytes({}): a client may make the relay buffer a longer head",
                 self.max_head_bytes
+            ));
+        }
+        if self.shutdown_wait > Self::DEFAULT_SHUTDOWN_WAIT {
+            loose.push(alloc::format!(
+                "shutdown_wait({:?}): dropping a blocking relay may block for longer",
+                self.shutdown_wait
             ));
         }
         loose

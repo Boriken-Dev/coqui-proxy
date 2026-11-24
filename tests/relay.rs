@@ -561,13 +561,54 @@ async fn a_relay_stops_on_shutdown_and_on_drop_and_ends_its_tunnels() {
 }
 
 #[tokio::test]
-async fn starting_outside_a_runtime_is_an_error_not_a_panic() {
+async fn starting_outside_a_runtime_is_an_error_naming_start_on_not_a_panic() {
     let connector = Blocking::default().asynch();
     let resolver = direct();
     let outcome = std::thread::spawn(move || Relay::builder(connector, resolver).start().err())
         .join()
         .unwrap();
     assert!(matches!(outcome, Some(Error::Io(_))), "{outcome:?}");
+    let message = outcome.unwrap().to_string();
+    assert!(message.contains("start_on"), "{message}");
+}
+
+#[test]
+fn start_on_serves_through_a_runtime_handle_given_from_another_thread() {
+    let origin = StandInOrigin::start("on a handle");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let runtime_handle = runtime.handle().clone();
+    // This thread is in no runtime; the relay is built here and runs on the other one.
+    let (connector, resolver) = (Blocking::default().asynch(), direct());
+    let handle = std::thread::spawn(move || {
+        Relay::builder(connector, resolver)
+            .start_on(&runtime_handle)
+            .unwrap()
+    })
+    .join()
+    .unwrap();
+    let url = format!("http://127.0.0.1:{}/", origin.addr.port());
+    let text = get_through(&handle, &url, "");
+    let mut stream = std::net::TcpStream::connect(handle.address()).unwrap();
+    std::io::Write::write_all(&mut stream, text.as_bytes()).unwrap();
+    let mut reply = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(reply.ends_with("on a handle"), "{reply}");
+    drop(handle);
+    drop(runtime);
+}
+
+#[tokio::test]
+async fn what_means_nothing_to_the_asynchronous_relay_is_listed() {
+    let builder = Relay::builder(Blocking::default().asynch(), direct());
+    let listed = builder.not_applied();
+    assert!(listed.iter().any(|line| line.starts_with("shutdown_wait")));
+    assert!(listed.iter().any(|line| line.starts_with("poll_interval")));
+    assert_eq!(builder.build().unwrap().not_applied(), listed);
 }
 
 #[tokio::test(flavor = "current_thread")]
