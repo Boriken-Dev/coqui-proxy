@@ -24,6 +24,9 @@ mod netutil;
 #[cfg(feature = "pac")]
 pub mod pac;
 mod proxy;
+#[cfg(feature = "relay")]
+#[cfg_attr(docsrs, doc(cfg(feature = "relay")))]
+pub mod relay;
 mod resolver;
 pub mod settings;
 pub mod source;
@@ -41,7 +44,9 @@ pub use env::{EnvSource, EnvSourceBuilder, Environment, ProxyVariables};
 pub use error::{Error, Reason, UnsupportedProxy};
 pub use proxy::{Credentials, Proxy, ProxyBuilder, ProxyScheme, Route, Secret};
 pub use resolver::{ChildEnvironment, OnMissingEngine, ProxySetting, Resolver, ResolverBuilder};
-pub use settings::{ConnectorSettings, PacSettings, ReaderSettings, ResolverSettings};
+pub use settings::{
+    ConnectorSettings, PacSettings, ReaderSettings, RelaySettings, ResolverSettings,
+};
 pub use source::{ChainSource, ProxySource};
 
 /// This crate's version.

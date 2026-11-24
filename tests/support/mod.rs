@@ -237,25 +237,34 @@ fn pipe(client: TcpStream, upstream: TcpStream) {
 /// A loopback HTTP origin that answers every request with `body`.
 pub struct StandInOrigin {
     pub addr: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl StandInOrigin {
+    /// The request heads this origin has read.
+    pub fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+
     pub fn start(body: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_in = Arc::clone(&stop);
+        let (seen_in, stop_in) = (Arc::clone(&seen), Arc::clone(&stop));
         let thread = thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop_in.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(mut stream) = stream else { continue };
+                let seen = Arc::clone(&seen_in);
                 thread::spawn(move || {
                     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                    if read_head(&mut stream).is_some() {
+                    if let Some(head) = read_head(&mut stream) {
+                        seen.lock().unwrap().push(head);
                         let reply = format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
@@ -267,6 +276,7 @@ impl StandInOrigin {
         });
         Self {
             addr,
+            seen,
             stop,
             thread: Some(thread),
         }

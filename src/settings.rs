@@ -316,3 +316,101 @@ impl ResolverSettings {
         pac
     }
 }
+
+/// What the in-process [`relay`](crate::relay) listens on and how much of a client it accepts.
+///
+/// The relay has no access control but its credential, so it only listens on a loopback address;
+/// every other bound is a setting, and raising one costs what its line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RelaySettings {
+    /// The loopback address to listen on (`127.0.0.1`); any other address is refused.
+    pub address: core::net::IpAddr,
+    /// The port to listen on (0: the system picks a free one).
+    pub port: u16,
+    /// The most client connections served at once (256). Past it, new connections wait in the
+    /// listener's backlog. Raising it lets more local clients hold sockets and tasks.
+    pub max_connections: usize,
+    /// How long a client may take to send a request head (30 s). Raising it lets a client hold a
+    /// connection slot while sending slowly.
+    pub header_timeout: Duration,
+    /// How long a connection, to the client or to the destination, may carry no byte in either
+    /// direction before it is closed (300 s). A reply that starts later than this is cut;
+    /// raising it keeps idle connections, and the slots they hold, for longer.
+    pub idle_timeout: Duration,
+    /// The longest request head accepted (64 KiB), at least 8 KiB (the smallest buffer hyper's
+    /// HTTP/1 server works with). A longer head is answered `431` and the connection closed.
+    pub max_head_bytes: usize,
+    /// How long the listener waits after a failed `accept` (a full descriptor table, for
+    /// example) before trying again (100 ms).
+    pub accept_retry: Duration,
+}
+
+impl RelaySettings {
+    /// The default listening address.
+    pub const DEFAULT_ADDRESS: core::net::IpAddr =
+        core::net::IpAddr::V4(core::net::Ipv4Addr::LOCALHOST);
+    /// The default port: any free one.
+    pub const DEFAULT_PORT: u16 = 0;
+    /// The default most simultaneous connections.
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+    /// The default time to send a request head.
+    pub const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+    /// The default idle time.
+    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    /// The default longest request head.
+    pub const DEFAULT_MAX_HEAD_BYTES: usize = 64 * 1024;
+    /// The default pause after a failed `accept`.
+    pub const DEFAULT_ACCEPT_RETRY: Duration = Duration::from_millis(100);
+    /// The smallest request head limit the HTTP/1 server accepts.
+    pub const MIN_MAX_HEAD_BYTES: usize = 8 * 1024;
+}
+
+impl Default for RelaySettings {
+    fn default() -> Self {
+        Self {
+            address: Self::DEFAULT_ADDRESS,
+            port: Self::DEFAULT_PORT,
+            max_connections: Self::DEFAULT_MAX_CONNECTIONS,
+            header_timeout: Self::DEFAULT_HEADER_TIMEOUT,
+            idle_timeout: Self::DEFAULT_IDLE_TIMEOUT,
+            max_head_bytes: Self::DEFAULT_MAX_HEAD_BYTES,
+            accept_retry: Self::DEFAULT_ACCEPT_RETRY,
+        }
+    }
+}
+
+impl RelaySettings {
+    /// What these settings do that is looser than the defaults: an empty list is the strict
+    /// configuration.
+    #[must_use]
+    pub fn non_defaults(&self) -> alloc::vec::Vec<alloc::string::String> {
+        let mut loose = alloc::vec::Vec::new();
+        if self.max_connections > Self::DEFAULT_MAX_CONNECTIONS {
+            loose.push(alloc::format!(
+                "max_connections({}): more local connections than the default {}",
+                self.max_connections,
+                Self::DEFAULT_MAX_CONNECTIONS
+            ));
+        }
+        if self.header_timeout > Self::DEFAULT_HEADER_TIMEOUT {
+            loose.push(alloc::format!(
+                "header_timeout({:?}): a client may hold a slot longer while sending a head",
+                self.header_timeout
+            ));
+        }
+        if self.idle_timeout > Self::DEFAULT_IDLE_TIMEOUT {
+            loose.push(alloc::format!(
+                "idle_timeout({:?}): an idle connection keeps its slot longer",
+                self.idle_timeout
+            ));
+        }
+        if self.max_head_bytes > Self::DEFAULT_MAX_HEAD_BYTES {
+            loose.push(alloc::format!(
+                "max_head_bytes({}): a client may make the relay buffer a longer head",
+                self.max_head_bytes
+            ));
+        }
+        loose
+    }
+}
