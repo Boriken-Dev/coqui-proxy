@@ -27,12 +27,12 @@
 //! # Security
 //!
 //! The relay has no access control but its credential, so it listens on a loopback address only
-//! (a [`RelaySettings::address`](crate::RelaySettings) that is not one is an error) and every
+//! (a [`RelaySettings::address`] that is not one is an error) and every
 //! request must carry `Proxy-Authorization: Basic` with a random credential made for each relay
 //! (256 bits from the operating system's generator), or the same secret in the [`TOKEN_HEADER`]
 //! header, compared in constant time. Another local user or process cannot use it without having
 //! read it. The credential never reaches a log, an error or a `Debug`, and is never forwarded.
-//! Each bound of [`RelaySettings`](crate::RelaySettings) is a setting.
+//! Each bound of [`RelaySettings`] is a setting.
 //!
 //! The header exists for clients that drop `Proxy-Authorization` when a redirect leads to another
 //! host (`reqwest` does for plain `http:` requests, which would then get `407`): a header of
