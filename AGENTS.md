@@ -226,7 +226,8 @@ input.
 Relay::builder(connector: asynch::ProxyConnector, resolver: Resolver) -> RelayBuilder
 RelayBuilder::{settings(RelaySettings), non_defaults() -> Vec<String>, build() -> Result<Relay, Error>, start() -> Result<RelayHandle, Error>}
 Relay::{start(self) -> Result<RelayHandle, Error>, settings() -> &RelaySettings}
-RelayHandle::{address() -> SocketAddr, proxy_url() -> String, proxy() -> &Proxy, credentials() -> &Credentials, shutdown(self) /* async */}
+RelayHandle::{address() -> SocketAddr, proxy_url() -> String, proxy() -> &Proxy, credentials() -> &Credentials, token_header() -> (&'static str, &str), shutdown(self) /* async */}
+relay::TOKEN_HEADER: &str   // "x-coqui-relay-token"
 ```
 
 A loopback HTTP proxy that runs as tasks on the caller's Tokio runtime and sends every request
@@ -250,6 +251,9 @@ keep the handle as long as the client.
   credential, user `coqui-relay` and a random 256-bit password from the operating system's
   generator, compared in constant time; otherwise `407` with `Proxy-Authenticate`. `Debug` never
   shows it; `proxy_url()` leaves it out; `proxy()` and `credentials()` carry it. It is never forwarded.
+  The same secret is also accepted as the value of the `x-coqui-relay-token` header (`token_header()`), for
+  a client that drops `Proxy-Authorization` when a redirect leads to another host (`reqwest` does, for
+  plain `http:` requests); the relay removes that header before forwarding.
 - **Loopback only**: `RelaySettings::address` must be a loopback address (`127.0.0.1` by default,
   `::1` allowed); the credential is the only access control. `RelayBuilder::build` returns
   `Error::Settings` for anything else, a zero count or time, or `max_head_bytes` under 8 KiB.

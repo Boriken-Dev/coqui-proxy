@@ -32,4 +32,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `relay` (feature `relay`): `Relay`, `RelayBuilder`, `RelayHandle`, `RelaySettings`: a loopback HTTP proxy
   started inside the process that sends `CONNECT` and absolute-form `http:` requests through the
   connector, with a random per-relay `Proxy-Authorization: Basic` credential, for clients that cannot take
-  a connector (`reqwest`) but should still get failover, PAC, bypass rules and proxy login.
+  a connector (`reqwest`) but should still get failover, PAC, bypass rules and proxy login. The credential is
+  also accepted in the `x-coqui-relay-token` header, which a client keeps across a redirect to another host.

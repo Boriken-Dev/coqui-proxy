@@ -282,10 +282,12 @@ pub fn coqui_proxy::relay::RelayHandle::credentials(&self) -> &coqui_proxy::Cred
 pub fn coqui_proxy::relay::RelayHandle::proxy(&self) -> &coqui_proxy::Proxy
 pub fn coqui_proxy::relay::RelayHandle::proxy_url(&self) -> alloc::string::String
 pub async fn coqui_proxy::relay::RelayHandle::shutdown(self)
+pub fn coqui_proxy::relay::RelayHandle::token_header(&self) -> (&'static str, &str)
 impl core::fmt::Debug for coqui_proxy::relay::RelayHandle
 pub fn coqui_proxy::relay::RelayHandle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::ops::drop::Drop for coqui_proxy::relay::RelayHandle
 pub fn coqui_proxy::relay::RelayHandle::drop(&mut self)
+pub const coqui_proxy::relay::TOKEN_HEADER: &str
 pub mod coqui_proxy::settings
 #[non_exhaustive] pub struct coqui_proxy::settings::ConnectorSettings
 pub coqui_proxy::settings::ConnectorSettings::bad_proxy_ttl: core::time::Duration
