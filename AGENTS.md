@@ -16,14 +16,15 @@ MSRV Rust 1.89, edition 2024. A default build depends on `http`, `percent-encodi
 | `libproxy` | Unix: `libloading` | `system::LibProxySource` |
 | `tokio` | `tokio`, `tokio-rustls` | `asynch::*`: the connector on Tokio (an `https:` proxy also needs `tls`) |
 | `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service` | `hyper::Connector` |
+| `relay` | `hyper` (server, client, HTTP/1), `http-body-util`, `bytes`, `getrandom`, `subtle` | `relay::*`: an in-process loopback proxy |
 
 Imports: the root re-exports `Resolver`, `ResolverBuilder`, `ProxySetting`, `OnMissingEngine`,
 `ChildEnvironment`, `Proxy`, `ProxyBuilder`, `ProxyScheme`, `Route`, `Credentials`, `Secret`,
 `BypassRules`, `Dialect`, `Environment`, `ProxyVariables`, `EnvSource`, `EnvSourceBuilder`,
 `ProxyConnector`, `ProxyConnectorBuilder`, `Connection`, `Negotiate`, `NegotiateBuilder`,
 `OriginAuth`, `OriginAuthBuilder`, `OriginLogin`, `ProxySource`, `ChainSource`, `Error`, `Reason`,
-`UnsupportedProxy`, `ConnectorSettings`, `PacSettings`, `ReaderSettings`, `ResolverSettings`,
-`VERSION`. Public modules: `auth`, `connect` (`core`, `socks`), `pac`, `settings`, `source`,
+`UnsupportedProxy`, `ConnectorSettings`, `PacSettings`, `ReaderSettings`, `RelaySettings`, `ResolverSettings`, `VERSION`. Public modules: `auth`, `connect`
+(`core`, `socks`), `pac`, `relay`, `settings`, `source`,
 `system`.
 
 `unsafe` is in `src/auth/sspi.rs` (SSPI with the logon session), `src/system/winhttp.rs`
@@ -219,6 +220,47 @@ Request, Version, Reply}`. Every `decode` takes the bytes read so far and return
 `Progress::Incomplete(n)`, `Progress::Complete { value, consumed }` or an error; none panics on any
 input.
 
+## The in-process relay (`coqui_proxy::relay`, feature `relay`)
+
+```rust
+Relay::builder(connector: asynch::ProxyConnector, resolver: Resolver) -> RelayBuilder
+RelayBuilder::{settings(RelaySettings), non_defaults() -> Vec<String>, build() -> Result<Relay, Error>, start() -> Result<RelayHandle, Error>}
+Relay::{start(self) -> Result<RelayHandle, Error>, settings() -> &RelaySettings}
+RelayHandle::{address() -> SocketAddr, proxy_url() -> String, proxy() -> &Proxy, credentials() -> &Credentials, shutdown(self) /* async */}
+```
+
+A loopback HTTP proxy that runs as tasks on the caller's Tokio runtime and sends every request
+through the connector (its routes, failover and `bad_proxy_ttl`, PAC, bypass rules, SOCKS and proxy
+login, `Direct`), for an HTTP client that cannot take a connector or retry a route. `start` does
+not wait and is not `async`, but needs a runtime (`Error::Io` otherwise) and returns once the
+listener is bound. It stops, and ends every connection and tunnel it serves, when the
+`RelayHandle` is dropped or on `shutdown().await` (which returns when the listener is closed);
+keep the handle as long as the client.
+
+- `CONNECT host:port`: dialled through the connector (resolved as `https://host:port/`, `http:`
+  for port 80), `200`, spliced both ways. TLS to the destination is the client's.
+- Absolute-form `http://` request: dialled through the connector, forwarded in origin form with
+  `Host` set from the URL, without hop-by-hop headers (`Connection` and what it names,
+  `Keep-Alive`, `Proxy-*`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`), reply streamed back.
+  One destination connection per request; the client's connection to the relay is kept alive.
+  Upgrades other than `CONNECT` (WebSocket over plain `http:`) are not forwarded.
+- No route reaches the destination (including a refused proxy login): `502` with the error's text.
+  A malformed `CONNECT` target: `400`. Anything else, including an `https:` absolute form: `405`.
+- **Credential**: every request needs `Proxy-Authorization: Basic` with the relay's own
+  credential, user `coqui-relay` and a random 256-bit password from the operating system's
+  generator, compared in constant time; otherwise `407` with `Proxy-Authenticate`. `Debug` never
+  shows it; `proxy_url()` leaves it out; `proxy()` and `credentials()` carry it. It is never forwarded.
+- **Loopback only**: `RelaySettings::address` must be a loopback address (`127.0.0.1` by default,
+  `::1` allowed); the credential is the only access control. `RelayBuilder::build` returns
+  `Error::Settings` for anything else, a zero count or time, or `max_head_bytes` under 8 KiB.
+
+`RelaySettings` (also at the crate root; `#[non_exhaustive]`, `Default`, `DEFAULT_*`, `non_defaults()`):
+`address` 127.0.0.1, `port` 0 (any free), `max_connections` 256 (more connections wait in the
+listener's backlog), `header_timeout` 30 s (a head sent slower is cut off), `idle_timeout` 300 s (no
+byte either way on the client's or the destination's connection closes it; a reply that begins
+later than this is cut), `max_head_bytes` 64 KiB (longer: `431`, minimum 8 KiB), `accept_retry`
+100 ms. Raising any of the first five is listed by `non_defaults()`.
+
 ## Login (`coqui_proxy::auth`)
 
 `Negotiate::builder().proxies(hosts).credentials(..).plain_http(bool).max_legs(n).max_token(n).build()`
@@ -257,6 +299,9 @@ Every bound is a field with a `DEFAULT_*` constant; each type has `Default` and 
 | `::max_response_head_bytes`, `::max_response_headers`, `::max_response_body_bytes` | 64 KiB, 100, 64 KiB |
 | `Negotiate::max_legs`, `::max_token` | 5, 64 KiB |
 | `OriginAuth::max_body` | 1 MiB |
+| `RelaySettings::address`, `::port` | `127.0.0.1` (loopback only), 0 |
+| `::max_connections`, `::header_timeout`, `::idle_timeout` | 256, 30 s, 300 s |
+| `::max_head_bytes`, `::accept_retry` | 64 KiB (at least 8 KiB), 100 ms |
 
 A whole PAC download may take three times `download_timeout`.
 
@@ -287,3 +332,5 @@ system readers `XDG_CONFIG_HOME` and `HOME` (KDE's `kioslaverc`). Helper program
 - The library prints nothing, exits never, and keeps no process-wide state.
 - `Resolver::lookup` blocks (DNS, downloads, helper programs); async callers use
   `spawn_blocking`.
+- A relay's `proxy_url()` carries no credential: a client must be given `credentials()` as proxy
+  login, or it gets `407` for everything. A relay serves only while its `RelayHandle` lives.

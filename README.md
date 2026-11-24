@@ -39,6 +39,7 @@ cargo add --git https://github.com/Boriken-Dev/coqui-proxy coqui-proxy
 | `libproxy` | `libloading`: `system::LibProxySource` (Unix) | off |
 | `tokio` | `tokio`, `tokio-rustls`: `asynch::ProxyConnector`, `asynch::lookup` | off |
 | `hyper` | `tokio`, `hyper`, `hyper-util`, `tower-service`: `hyper::Connector`, a `tower` service for hyper's client | off |
+| `relay` | `hyper` with its server and client, `http-body-util`, `bytes`, `getrandom`, `subtle`: `relay::Relay`, a loopback proxy started in-process | off |
 
 ## Quick start
 
@@ -67,6 +68,21 @@ let resolver = Resolver::system();
 let stream = ProxyConnector::default().connect_url(&resolver, "https://example.com/")?;
 # let _ = stream;
 # Ok::<(), coqui_proxy::Error>(())
+```
+
+A client that cannot take a connector (`reqwest`) is given the relay: a loopback proxy started
+inside the process, protected by a random credential, that sends each request through the same
+connector, so failover, PAC, bypass rules and proxy login apply:
+
+```rust,ignore
+use coqui_proxy::{ProxyConnector, Resolver, relay::Relay};
+
+# async fn run() -> Result<(), coqui_proxy::Error> {
+let relay = Relay::builder(ProxyConnector::default().asynch(), Resolver::system()).start()?;
+// Hand `relay.proxy_url()` and `relay.credentials()` to the client; keep `relay` alive with it.
+# let _ = relay;
+# Ok(())
+# }
 ```
 
 The environment for a child process that cannot ask, from the same decision:
@@ -111,6 +127,7 @@ assert_eq!(resolver.lookup("https://a.corp.example/")?, [Route::Direct]);
 | `pac` | `PacScript`, `PacSource`, `FindProxy`, `discover`, `builtin_names` (feature `pac`) |
 | `asynch` | the connector on Tokio: `ProxyConnector`, `Connection`, `lookup` (feature `tokio`) |
 | `hyper` | `Connector`, a `tower` service that returns a tunnel (feature `hyper`) |
+| `relay` | `Relay`, `RelayBuilder`, `RelayHandle`: a loopback proxy started in-process, for clients that cannot take a connector (feature `relay`) |
 | `connect` | the sans-I/O cores: `core::{ConnectRequest, ConnectResponse, ProxyLogin}`, `socks::{Greeting, Request, Reply}` |
 | `auth` | `Negotiate`, `OriginAuth`, `OriginLogin`, `negotiate_available` |
 

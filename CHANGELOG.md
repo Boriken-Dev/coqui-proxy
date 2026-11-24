@@ -29,3 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   proxies and can try only the first route.
 - Settings types for every bound (`ResolverSettings`, `ReaderSettings`, `PacSettings`,
   `ConnectorSettings`) and `non_defaults()` on resolvers and connectors.
+- `relay` (feature `relay`): `Relay`, `RelayBuilder`, `RelayHandle`, `RelaySettings`: a loopback HTTP proxy
+  started inside the process that sends `CONNECT` and absolute-form `http:` requests through the
+  connector, with a random per-relay `Proxy-Authorization: Basic` credential, for clients that cannot take
+  a connector (`reqwest`) but should still get failover, PAC, bypass rules and proxy login.
