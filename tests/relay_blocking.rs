@@ -1035,6 +1035,23 @@ mod https_proxy {
         let mut connected = tunnel(&handle, "app.internal.test:80");
         assert!(get_in(&mut connected, "app.internal.test").ends_with("via https"));
     }
+
+    #[test]
+    fn a_connector_given_tls_for_the_proxy_after_it_was_built_keeps_its_bounds() {
+        let (port, config) = start();
+        let mut settings = coqui_proxy::ConnectorSettings::default();
+        settings.timeout = Duration::from_secs(20);
+        let connector = ProxyConnector::builder().settings(settings).build();
+        let connector = connector.with_proxy_tls(config);
+        let proxy = Proxy::builder(ProxyScheme::Https, "localhost", port)
+            .build()
+            .unwrap();
+        let handle = Relay::builder(connector, resolver("ALL_PROXY", proxy.to_string()))
+            .start()
+            .unwrap();
+        let mut connected = tunnel(&handle, "app.internal.test:80");
+        assert!(get_in(&mut connected, "app.internal.test").ends_with("via https"));
+    }
 }
 
 #[test]

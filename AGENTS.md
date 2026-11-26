@@ -188,7 +188,7 @@ ProxyConnector::default(); ProxyConnector::builder() -> ProxyConnectorBuilder
 ProxyConnectorBuilder::{failover(bool), bad_proxy_ttl(Duration), timeout(Duration), user_agent(String), negotiate(Negotiate), settings(ConnectorSettings), proxy_tls(Arc<rustls::ClientConfig>) /*tls*/, non_defaults(), build()}
 ProxyConnector::connect(&self, route: &Route, host: &str, port: u16) -> Result<Connection, Error>
 ProxyConnector::connect_url(&self, resolver: &Resolver, url: &str) -> Result<Connection, Error>
-ProxyConnector::{with_timeout(Duration), with_failover(bool, Duration), non_defaults()}
+ProxyConnector::{with_timeout(Duration), with_failover(bool, Duration), with_proxy_tls(Arc<ClientConfig>) (feature `tls`), non_defaults()}
 enum Connection { Tcp(TcpStream), Tls(Box<StreamOwned<..>>) /*tls*/ }   // Read + Write; socket()
 ```
 
