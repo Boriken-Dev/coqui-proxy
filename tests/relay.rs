@@ -654,3 +654,24 @@ async fn the_token_header_is_accepted_in_place_of_the_login_and_never_forwarded(
     assert!(head.starts_with("HTTP/1.1 407"), "{head}");
     assert_eq!(origin.seen().len(), 1);
 }
+
+#[tokio::test]
+async fn a_refused_request_closes_the_connection() {
+    let handle = relay(direct());
+    let mut stream = connect(&handle).await;
+    let anonymous = "GET http://x.test/ HTTP/1.1\r\nHost: x.test\r\n\r\n";
+    stream.write_all(anonymous.as_bytes()).await.unwrap();
+    let (head, _) = read_reply(&mut stream).await;
+    assert!(head.starts_with("HTTP/1.1 407"), "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("connection: close"),
+        "{head}"
+    );
+    // The relay has closed its side: a second request on the socket gets no answer.
+    let _ = stream.write_all(anonymous.as_bytes()).await;
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest))
+        .await
+        .expect("the relay closed the connection");
+    assert!(rest.is_empty(), "{}", String::from_utf8_lossy(&rest));
+}

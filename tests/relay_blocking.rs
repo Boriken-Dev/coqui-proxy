@@ -482,8 +482,15 @@ fn a_head_longer_than_the_limit_is_refused() {
 
 #[test]
 fn a_silent_connection_is_closed_after_the_idle_time() {
+    let origin = StandInOrigin::start("again");
     let handle = small(|s| s.idle_timeout = Duration::from_millis(300));
+    let url = format!("http://127.0.0.1:{}/", origin.addr.port());
     let mut stream = connect(&handle);
+    let text = get_through(&handle, &url, "").replace("Connection: close\r\n", "");
+    stream.write_all(text.as_bytes()).unwrap();
+    let (head, _) = read_reply(&mut stream);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    // Between authenticated requests the wait is the idle time, not the header time (30 s).
     let started = Instant::now();
     let mut buffer = [0u8; 16];
     let read = stream.read(&mut buffer);
@@ -1053,4 +1060,21 @@ fn a_body_may_arrive_more_slowly_than_a_head_may() {
     let (head, body) = read_reply(&mut stream);
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert_eq!(body, "slowl");
+}
+
+#[test]
+fn a_connection_that_sends_no_request_is_closed_after_the_header_time() {
+    let handle = small(|s| {
+        s.header_timeout = Duration::from_millis(300);
+        s.idle_timeout = Duration::from_secs(60);
+    });
+    let mut stream = connect(&handle);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let started = Instant::now();
+    let mut buffer = [0u8; 16];
+    let read = stream.read(&mut buffer);
+    assert!(matches!(read, Ok(0)), "{read:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
